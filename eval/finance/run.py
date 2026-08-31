@@ -74,6 +74,10 @@ def parse_args():
                         help="Total token budget for playbook")
     parser.add_argument("--test_workers", type=int, default=20,
                         help="Number of parallel workers for testing")
+    parser.add_argument("--max_samples", type=int, default=None,
+                        help="Keep at most this many samples from each of the train/val/test "
+                             "splits. Useful for cheap smoke tests on limited API quota; "
+                             "unset means use the full splits")
     
     # Prompt configuration
     parser.add_argument("--json_mode", action="store_true",
@@ -116,7 +120,16 @@ def load_data(data_path: str):
     print(f"Loaded {len(data)} samples from {data_path}")
     return data
 
-def preprocess_data(task_name, config, mode):
+def limit_samples(samples, max_samples, split_name):
+    """Truncate a split to at most max_samples items (no-op when max_samples is None)."""
+    if max_samples is None or max_samples <= 0 or len(samples) <= max_samples:
+        return samples
+
+    print(f"Limiting {split_name} split: {len(samples)} -> {max_samples} samples")
+    return samples[:max_samples]
+
+
+def preprocess_data(task_name, config, mode, max_samples=None):
     """
     Load training and test data for the specified task.
     
@@ -124,6 +137,7 @@ def preprocess_data(task_name, config, mode):
         task_name: Name of the task
         config: Configuration dictionary with data paths
         mode: Run mode ('offline', 'online', or 'eval_only')
+        max_samples: Optional cap on the number of samples kept per split
     
     Returns:
         Tuple of (train_samples, val_samples, test_samples, data_processor)
@@ -140,6 +154,7 @@ def preprocess_data(task_name, config, mode):
         
         if "test_data" in config:
             test_samples = load_data(config["test_data"])
+            test_samples = limit_samples(test_samples, max_samples, "test")
             test_samples = processor.process_task_data(test_samples)
         else:
             raise ValueError(f"{mode} mode requires test data in config.")
@@ -153,11 +168,14 @@ def preprocess_data(task_name, config, mode):
     else:
         train_samples = load_data(config["train_data"])
         val_samples = load_data(config["val_data"])
+        train_samples = limit_samples(train_samples, max_samples, "train")
+        val_samples = limit_samples(val_samples, max_samples, "val")
         train_samples = processor.process_task_data(train_samples)
         val_samples = processor.process_task_data(val_samples)
         
         if "test_data" in config:
             test_samples = load_data(config["test_data"])
+            test_samples = limit_samples(test_samples, max_samples, "test")
             test_samples = processor.process_task_data(test_samples)
         else:
             test_samples = []
@@ -195,7 +213,8 @@ def main():
     train_samples, val_samples, test_samples, data_processor = preprocess_data(
         args.task_name, 
         task_config[args.task_name],
-        args.mode
+        args.mode,
+        args.max_samples
     )
         
     # Load initial playbook (or use empty if None provided)
@@ -241,6 +260,7 @@ def main():
         'curator_batch_size': args.curator_batch_size,
         'curator_num_groups': args.curator_num_groups,
         'augmented_shuffling': args.augmented_shuffling,
+        'max_samples': args.max_samples,
     }
     
     # Execute using the unified run method
