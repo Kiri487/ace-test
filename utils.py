@@ -32,6 +32,19 @@ def initialize_clients(api_provider):
         api_key = os.getenv('OPENAI_API_KEY', '')
         if not api_key:
             raise ValueError("OpenAI api key not found in environment variables")
+    elif api_provider == "groq":
+        # Use Groq's OpenAI-compatible API
+        base_url = os.getenv('GROQ_BASE_URL', '').strip() or "https://api.groq.com/openai/v1"
+        api_key = os.getenv('GROQ_API_KEY', '')
+        if not api_key:
+            raise ValueError("Groq api key not found in environment variables")
+    elif api_provider == "gemini":
+        # Use Google Gemini's OpenAI-compatible API
+        gemini_default = "https://generativelanguage.googleapis.com/v1beta/openai/"
+        base_url = os.getenv('GEMINI_BASE_URL', '').strip() or gemini_default
+        api_key = os.getenv('GEMINI_API_KEY', '')
+        if not api_key:
+            raise ValueError("Gemini api key not found in environment variables")
     elif api_provider == "commonstack":
         # Use Commonstack API
         base_url = "https://api.commonstack.ai/v1"
@@ -40,7 +53,8 @@ def initialize_clients(api_provider):
             raise ValueError("Commonstack api key not found in environment variables")
     else:
         raise ValueError(
-            f"Invalid api_provider name: {api_provider}. Must be 'sambanova', 'together', 'openai', or 'commonstack'"
+            f"Invalid api_provider name: {api_provider}. Must be 'sambanova', "
+            f"'together', 'openai', 'groq', 'gemini', or 'commonstack'"
         )
         
     generator_client = openai.OpenAI(api_key=api_key, base_url=base_url)
