@@ -26,8 +26,9 @@ def initialize_clients(api_provider):
         if not api_key:
             raise ValueError("Together api key not found in environment variables")
     elif api_provider == "openai":
-        # Use OpenAI API
-        base_url = "https://api.openai.com/v1"
+        # Use OpenAI API, or any OpenAI-compatible endpoint via OPENAI_BASE_URL
+        # (e.g. Groq, the Gemini OpenAI-compatible endpoint, a local Ollama server)
+        base_url = os.getenv('OPENAI_BASE_URL', '').strip() or "https://api.openai.com/v1"
         api_key = os.getenv('OPENAI_API_KEY', '')
         if not api_key:
             raise ValueError("OpenAI api key not found in environment variables")
@@ -46,7 +47,7 @@ def initialize_clients(api_provider):
     reflector_client = openai.OpenAI(api_key=api_key, base_url=base_url)
     curator_client = openai.OpenAI(api_key=api_key, base_url=base_url)
     
-    print(f"Using {api_provider} API for all models")
+    print(f"Using {api_provider} API for all models ({base_url})")
     return generator_client, reflector_client, curator_client
 
 def get_section_slug(section_name):
