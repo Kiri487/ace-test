@@ -26,9 +26,8 @@ def initialize_clients(api_provider):
         if not api_key:
             raise ValueError("Together api key not found in environment variables")
     elif api_provider == "openai":
-        # Use OpenAI API, or any OpenAI-compatible endpoint via OPENAI_BASE_URL
-        # (e.g. Groq, the Gemini OpenAI-compatible endpoint, a local Ollama server)
-        base_url = os.getenv('OPENAI_BASE_URL', '').strip() or "https://api.openai.com/v1"
+        # Use OpenAI API
+        base_url = "https://api.openai.com/v1"
         api_key = os.getenv('OPENAI_API_KEY', '')
         if not api_key:
             raise ValueError("OpenAI api key not found in environment variables")
@@ -45,6 +44,11 @@ def initialize_clients(api_provider):
         api_key = os.getenv('GEMINI_API_KEY', '')
         if not api_key:
             raise ValueError("Gemini api key not found in environment variables")
+    elif api_provider == "ollama":
+        # Use a local Ollama server's OpenAI-compatible API. Ollama ignores the
+        # key, but the OpenAI SDK requires a non-empty one.
+        base_url = os.getenv('OLLAMA_BASE_URL', '').strip() or "http://localhost:11434/v1"
+        api_key = os.getenv('OLLAMA_API_KEY', '').strip() or "ollama"
     elif api_provider == "commonstack":
         # Use Commonstack API
         base_url = "https://api.commonstack.ai/v1"
@@ -54,7 +58,7 @@ def initialize_clients(api_provider):
     else:
         raise ValueError(
             f"Invalid api_provider name: {api_provider}. Must be 'sambanova', "
-            f"'together', 'openai', 'groq', 'gemini', or 'commonstack'"
+            f"'together', 'openai', 'groq', 'gemini', 'ollama', or 'commonstack'"
         )
         
     generator_client = openai.OpenAI(api_key=api_key, base_url=base_url)
