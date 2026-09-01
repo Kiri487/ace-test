@@ -5,6 +5,7 @@ This component analyzes playbook bulletpoints for similarity and performs
 intelligent deduplication and merging using embeddings and LLM.
 """
 
+import os
 import re
 import numpy as np
 from typing import List, Dict, Tuple, Any, Optional
@@ -73,7 +74,8 @@ class BulletpointAnalyzer:
         client,
         model: str,
         max_tokens: int = 4096,
-        embedding_model_name: str = 'all-mpnet-base-v2'
+        embedding_model_name: str = 'all-mpnet-base-v2',
+        embedding_device: Optional[str] = None
     ):
         """
         Initialize the bulletpoint analyzer.
@@ -83,12 +85,16 @@ class BulletpointAnalyzer:
             model: Model name for LLM
             max_tokens: Maximum tokens for LLM responses
             embedding_model_name: Sentence transformer model for embeddings
+            embedding_device: Torch device for the embedding model. Defaults to
+                ACE_EMBEDDING_DEVICE, else 'cpu' - the model is small and keeping
+                it off the GPU leaves the whole VRAM budget to the LLM
         """
         self.client = client
         self.model = model
         self.max_tokens = max_tokens
         self.embedding_model_name = embedding_model_name
         self.embedding_model = None
+        self.embedding_device = embedding_device or os.getenv('ACE_EMBEDDING_DEVICE', 'cpu')
         
         if not DEDUP_AVAILABLE:
             print("⚠️  Bulletpoint analyzer initialized but dependencies not available")
@@ -96,8 +102,11 @@ class BulletpointAnalyzer:
     def _load_embedding_model(self):
         """Load sentence transformer model for embeddings."""
         if self.embedding_model is None and DEDUP_AVAILABLE:
-            print(f"Loading embedding model: {self.embedding_model_name}")
-            self.embedding_model = SentenceTransformer(self.embedding_model_name)
+            print(f"Loading embedding model: {self.embedding_model_name} "
+                  f"(device={self.embedding_device})")
+            self.embedding_model = SentenceTransformer(
+                self.embedding_model_name, device=self.embedding_device
+            )
     
     def _parse_playbook(self, playbook: str) -> Tuple[List[str], List[Dict[str, Any]], Dict[int, int]]:
         """
