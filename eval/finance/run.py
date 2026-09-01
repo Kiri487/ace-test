@@ -91,6 +91,11 @@ def parse_args():
                         help="Enable bulletpoint analyzer for deduplication and merging")
     parser.add_argument("--bulletpoint_analyzer_threshold", type=float, default=0.90,
                         help="Similarity threshold for bulletpoint analyzer (0-1, default: 0.90)")
+    parser.add_argument("--bulletpoint_merge", action="store_true",
+                        help="Have an LLM rewrite each group of similar bullets into one. "
+                             "Off by default: groups are de-duplicated by keeping the first "
+                             "bullet and dropping the rest, which is the paper's non-LLM "
+                             "merging and de-duplication (S4.7)")
     
     # Output configuration
     parser.add_argument("--save_path", type=str, required=True,
@@ -235,7 +240,8 @@ def main():
         max_tokens=args.max_tokens,
         initial_playbook=initial_playbook,
         use_bulletpoint_analyzer=args.use_bulletpoint_analyzer,
-        bulletpoint_analyzer_threshold=args.bulletpoint_analyzer_threshold
+        bulletpoint_analyzer_threshold=args.bulletpoint_analyzer_threshold,
+        bulletpoint_merge=args.bulletpoint_merge
     )
     
     # Prepare configuration
@@ -256,6 +262,7 @@ def main():
         'initial_playbook_path': args.initial_playbook_path,
         'use_bulletpoint_analyzer': args.use_bulletpoint_analyzer,
         'bulletpoint_analyzer_threshold': args.bulletpoint_analyzer_threshold,
+        'bulletpoint_merge': args.bulletpoint_merge,
         'api_provider': args.api_provider,
         'batch_size': args.batch_size,
         'curator_batch_size': args.curator_batch_size,

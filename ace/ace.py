@@ -39,7 +39,8 @@ class ACE:
         max_tokens: int = 4096,
         initial_playbook: Optional[str] = None,
         use_bulletpoint_analyzer: bool = False,
-        bulletpoint_analyzer_threshold: float = 0.90
+        bulletpoint_analyzer_threshold: float = 0.90,
+        bulletpoint_merge: bool = False
     ):
         """
         Initialize the ACE system.
@@ -53,6 +54,9 @@ class ACE:
             initial_playbook: Initial playbook content (optional)
             use_bulletpoint_analyzer: Whether to use bulletpoint analyzer for deduplication
             bulletpoint_analyzer_threshold: Similarity threshold for bulletpoint analyzer (0-1)
+            bulletpoint_merge: If True, an LLM rewrites each similar group into one bullet.
+                If False (default), similar groups are de-duplicated by keeping the first
+                bullet - the paper's non-LLM merging and de-duplication
         """
         # Initialize API clients
         generator_client, reflector_client, curator_client = initialize_clients(api_provider)
@@ -65,6 +69,7 @@ class ACE:
         # Initialize bulletpoint analyzer if requested and available
         self.use_bulletpoint_analyzer = use_bulletpoint_analyzer
         self.bulletpoint_analyzer_threshold = bulletpoint_analyzer_threshold
+        self.bulletpoint_merge = bulletpoint_merge
         
         if use_bulletpoint_analyzer:
             self.bulletpoint_analyzer = BulletpointAnalyzer(
@@ -72,7 +77,9 @@ class ACE:
                 curator_model, 
                 max_tokens
             )
-            print(f"✓ BulletpointAnalyzer initialized (threshold={bulletpoint_analyzer_threshold})")
+            merge_mode = "LLM merge" if bulletpoint_merge else "dedup only (non-LLM)"
+            print(f"✓ BulletpointAnalyzer initialized "
+                  f"(threshold={bulletpoint_analyzer_threshold}, {merge_mode})")
         else:
             self.bulletpoint_analyzer = None
         
@@ -131,7 +138,8 @@ class ACE:
             'save_dir': config.get('save_dir', './results'),
             'test_workers': config.get('test_workers', 20),
             'use_bulletpoint_analyzer': config.get('use_bulletpoint_analyzer', False),
-            'bulletpoint_analyzer_threshold': config.get('bulletpoint_analyzer_threshold', 0.90)
+            'bulletpoint_analyzer_threshold': config.get('bulletpoint_analyzer_threshold', 0.90),
+            'bulletpoint_merge': config.get('bulletpoint_merge', False)
         }
     
     def _setup_paths(self, save_dir: str, task_name: str, mode: str) -> Tuple[str, str]:
@@ -602,7 +610,7 @@ class ACE:
                 self.playbook = self.bulletpoint_analyzer.analyze(
                     playbook=self.playbook,
                     threshold=self.bulletpoint_analyzer_threshold,
-                    merge=True
+                    merge=self.bulletpoint_merge
                 )
         
         # STEP 4: Post-curator generation
