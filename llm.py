@@ -6,11 +6,80 @@ llm.py
 This file contains the LLM class for the project.
 
 """
+import os
+import json
 import time
 import random
 from datetime import datetime
 import openai
 from logger import log_llm_call, log_problematic_request
+
+
+_prompt_token_limit = None
+_prompt_token_limit_loaded = False
+
+
+def _get_prompt_token_limit():
+    """Read ACE_MAX_PROMPT_TOKENS once. Unset or invalid disables the guard."""
+    global _prompt_token_limit, _prompt_token_limit_loaded
+    if not _prompt_token_limit_loaded:
+        raw = os.getenv("ACE_MAX_PROMPT_TOKENS", "").strip()
+        _prompt_token_limit = int(raw) if raw.isdigit() and int(raw) > 0 else None
+        _prompt_token_limit_loaded = True
+        if _prompt_token_limit:
+            print(f"[GUARD] Context overflow guard active at {_prompt_token_limit} prompt tokens")
+    return _prompt_token_limit
+
+
+def check_prompt_fits(prompt, role, call_id, log_dir):
+    """
+    Warn when a prompt is about to overflow the model's context window.
+
+    Ollama truncates an over-length prompt silently: no error, a normal-looking
+    response, a normal-looking score. Without this the run keeps going and
+    quietly produces garbage for hours.
+
+    The count comes from tiktoken cl100k_base, which is only an approximation
+    for non-OpenAI models, so set ACE_MAX_PROMPT_TOKENS comfortably below the
+    real num_ctx (e.g. 20000 for a 24576 window). Warns by default; set
+    ACE_ABORT_ON_OVERFLOW=1 to make it fatal instead.
+    """
+    limit = _get_prompt_token_limit()
+    if limit is None:
+        return
+
+    from utils import count_tokens
+    num_tokens = count_tokens(prompt)
+    if num_tokens <= limit:
+        return
+
+    banner = "!" * 60
+    print()
+    print(banner)
+    print(f"[{role.upper()}] CONTEXT OVERFLOW RISK on {call_id}: "
+          f"~{num_tokens} prompt tokens exceeds limit {limit}")
+    print(banner)
+    print()
+
+    if log_dir:
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+            with open(os.path.join(log_dir, "context_overflow.jsonl"), "a") as f:
+                print(json.dumps({
+                    "datetime": datetime.now().isoformat(),
+                    "role": role,
+                    "call_id": call_id,
+                    "prompt_num_tokens": num_tokens,
+                    "limit": limit,
+                }), file=f)
+        except Exception as e:
+            print(f"Warning: failed to log context overflow: {e}")
+
+    if os.getenv("ACE_ABORT_ON_OVERFLOW", "").strip() == "1":
+        raise RuntimeError(
+            f"Prompt for {call_id} is ~{num_tokens} tokens, over the "
+            f"ACE_MAX_PROMPT_TOKENS limit of {limit}"
+        )
 
 def timed_llm_call(client, api_provider, model, prompt, role, call_id, max_tokens=4096, log_dir=None,
                    sleep_seconds=15, retries_on_timeout=1000, attempt=1, use_json_mode=False):
@@ -74,6 +143,9 @@ def timed_llm_call(client, api_provider, model, prompt, role, call_id, max_token
             # Add JSON mode if requested
             if use_json_mode:
                 api_params["response_format"] = {"type": "json_object"}
+
+            check_prompt_fits(prompt, role, call_id, log_dir)
+
             call_start = time.time()
             response = active_client.chat.completions.create(**api_params)
             call_end = time.time()
