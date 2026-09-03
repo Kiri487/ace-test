@@ -19,6 +19,46 @@ from logger import *
 from utils import *
 
 
+
+
+def _git_commit():
+    """The commit these results were produced by, and whether the tree was
+    dirty. Returns None outside a repo rather than failing a run over it."""
+    import subprocess
+    try:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        rev = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root,
+                             capture_output=True, text=True, timeout=10)
+        if rev.returncode != 0:
+            return None
+        dirty = subprocess.run(["git", "status", "--porcelain"], cwd=root,
+                               capture_output=True, text=True, timeout=10)
+        return {"commit": rev.stdout.strip(), "dirty": bool(dirty.stdout.strip())}
+    except Exception:
+        return None
+
+
+def _environment_feedback(data_processor, predicted, target, default):
+    """Real environment feedback, when the task can produce any.
+
+    Reflector.reflect() has always taken an `environment_feedback` argument, but
+    both call sites below hardcoded it: for a task whose ground truth is a
+    string there is nothing to say beyond "right" or "wrong". A task with an
+    actual environment - a backtest, an executor - can say *how* wrong, which is
+    the kind of signal the paper feeds back in its AppWorld setting.
+
+    Optional by design: a DataProcessor without the hook gets exactly the string
+    that was hardcoded before, so existing tasks are unchanged.
+    """
+    hook = getattr(data_processor, "environment_feedback", None)
+    if hook is None:
+        return default
+    try:
+        return hook(predicted, target)
+    except Exception:
+        return default
+
+
 class ACE:
     """
     Main ACE system orchestrator.
@@ -154,11 +194,23 @@ class ACE:
         Returns:
             Tuple of (usage_log_path, playbook_dir)
         """
-        # Create timestamped run folder
+        # Create timestamped run folder. The timestamp is only second-grained,
+        # so two runs launched together land on the same name; with
+        # exist_ok=True they then silently shared one directory - interleaved
+        # detailed_llm_logs, colliding call ids, and a run_config.json holding
+        # whichever run wrote last. Take the next free suffix instead, and let
+        # makedirs itself be the lock so two processes cannot both win.
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_folder = f"ace_run_{timestamp}_{task_name}_{mode}"
-        save_path = os.path.join(save_dir, run_folder)
-        os.makedirs(save_path, exist_ok=True)
+        suffix = 0
+        while True:
+            candidate = run_folder if suffix == 0 else f"{run_folder}_{suffix}"
+            save_path = os.path.join(save_dir, candidate)
+            try:
+                os.makedirs(save_path)
+                break
+            except FileExistsError:
+                suffix += 1
         log_dir = os.path.join(save_path, "detailed_llm_logs")
         os.makedirs(log_dir, exist_ok=True)
 
@@ -226,6 +278,9 @@ class ACE:
             json.dump({
                 "task_name": task_name,
                 "mode": mode,
+                # Without this a result set cannot be traced to the code that
+                # produced it, and results/ is gitignored with no backup.
+                "git_commit": _git_commit(),
                 "generator_model": self.generator.model,
                 "reflector_model": self.reflector.model,
                 "curator_model": self.curator.model,
@@ -520,7 +575,9 @@ class ACE:
                     reasoning_trace=gen_response,
                     predicted_answer=final_answer,
                     ground_truth=target if not no_ground_truth else None,
-                    environment_feedback="Predicted answer does not match ground truth",
+                    environment_feedback=_environment_feedback(
+                        data_processor, final_answer, target,
+                        "Predicted answer does not match ground truth"),
                     bullets_used=playbook_bullets,
                     use_ground_truth=not no_ground_truth,
                     use_json_mode=use_json_mode,
@@ -563,7 +620,9 @@ class ACE:
                 reasoning_trace=gen_response,
                 predicted_answer=final_answer,
                 ground_truth=target if not no_ground_truth else None,
-                environment_feedback="Predicted answer matches ground truth",
+                environment_feedback=_environment_feedback(
+                    data_processor, final_answer, target,
+                    "Predicted answer matches ground truth"),
                 bullets_used=playbook_bullets,
                 use_ground_truth=not no_ground_truth,
                 use_json_mode=use_json_mode,
