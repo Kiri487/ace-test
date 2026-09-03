@@ -2,6 +2,7 @@
 import os
 import re
 import json
+import httpx
 import openai
 import tiktoken
 from dotenv import load_dotenv
@@ -10,6 +11,50 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Load environment variables from .env file
 load_dotenv()
+
+
+class _ClineUnwrapTransport(httpx.HTTPTransport):
+    """Undo the Cline API's response envelope so the OpenAI SDK can parse it.
+
+    Cline answers chat completions as {"success": true, "data": {...}} rather
+    than the bare OpenAI object. The SDK parses that to choices=None, which
+    timed_llm_call raises as "Empty response from API" - and that is classified
+    retryable, so an unpatched run does not fail, it sleeps and retries for
+    hours. Measured 2026-09-03.
+
+    Deliberately left alone: GET /models, whose {"data": [...]} already matches
+    what the SDK expects (data is a list there, not a dict with choices), and
+    any non-JSON or streamed body.
+    """
+
+    def handle_request(self, request):
+        response = super().handle_request(request)
+        if "application/json" not in response.headers.get("content-type", ""):
+            return response
+
+        response.read()
+        body = response.content
+        status = response.status_code
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            payload = None
+
+        if isinstance(payload, dict):
+            data = payload.get("data")
+            if isinstance(data, dict) and "choices" in data:
+                body = json.dumps(data).encode("utf-8")
+            elif payload.get("success") is False and status == 200:
+                # A failure delivered with a 2xx status would otherwise look
+                # like an empty response and be retried forever. Make it loud.
+                status = 502
+
+        headers = httpx.Headers(response.headers)
+        headers.pop("content-encoding", None)  # body is already decoded
+        headers["content-length"] = str(len(body))
+        return httpx.Response(status_code=status, headers=headers,
+                              content=body, request=request)
+
 
 def initialize_clients(api_provider):
     """Initialize separate clients for generator, reflector, and curator"""
@@ -44,6 +89,12 @@ def initialize_clients(api_provider):
         api_key = os.getenv('GEMINI_API_KEY', '')
         if not api_key:
             raise ValueError("Gemini api key not found in environment variables")
+    elif api_provider == "clinepass":
+        # Use the Cline API (ClinePass subscription), which is OpenAI-compatible.
+        base_url = os.getenv('CLINE_BASE_URL', '').strip() or "https://api.cline.bot/api/v1"
+        api_key = os.getenv('CLINE_API_KEY', '')
+        if not api_key:
+            raise ValueError("Cline api key not found in environment variables")
     elif api_provider == "ollama":
         # Use a local Ollama server's OpenAI-compatible API. Ollama ignores the
         # key, but the OpenAI SDK requires a non-empty one.
@@ -58,12 +109,24 @@ def initialize_clients(api_provider):
     else:
         raise ValueError(
             f"Invalid api_provider name: {api_provider}. Must be 'sambanova', "
-            f"'together', 'openai', 'groq', 'gemini', 'ollama', or 'commonstack'"
+            f"'together', 'openai', 'groq', 'gemini', 'clinepass', 'ollama', "
+            f"or 'commonstack'"
         )
         
-    generator_client = openai.OpenAI(api_key=api_key, base_url=base_url)
-    reflector_client = openai.OpenAI(api_key=api_key, base_url=base_url)
-    curator_client = openai.OpenAI(api_key=api_key, base_url=base_url)
+    def _make_client():
+        kwargs = {"api_key": api_key, "base_url": base_url}
+        if api_provider == "clinepass":
+            # Our own httpx.Client defaults to a 5s timeout, which is far too
+            # short for an LLM call, so set it explicitly alongside the shim.
+            kwargs["http_client"] = httpx.Client(
+                transport=_ClineUnwrapTransport(),
+                timeout=httpx.Timeout(600.0, connect=10.0),
+            )
+        return openai.OpenAI(**kwargs)
+
+    generator_client = _make_client()
+    reflector_client = _make_client()
+    curator_client = _make_client()
     
     print(f"Using {api_provider} API for all models ({base_url})")
     return generator_client, reflector_client, curator_client
