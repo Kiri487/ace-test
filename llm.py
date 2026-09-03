@@ -31,6 +31,28 @@ def _get_prompt_token_limit():
     return _prompt_token_limit
 
 
+
+_max_retries = None
+_max_retries_loaded = False
+
+
+def _get_max_retries(default):
+    """Read ACE_MAX_RETRIES once. Unset leaves the caller's default untouched.
+
+    The default of 1000 retries with ~15-30s sleeps means a hard wall - an
+    exhausted quota, a revoked key - does not fail the run, it hangs it for
+    hours. Set this for any run against a metered or quota-limited provider.
+    """
+    global _max_retries, _max_retries_loaded
+    if not _max_retries_loaded:
+        raw = os.getenv("ACE_MAX_RETRIES", "").strip()
+        _max_retries = int(raw) if raw.isdigit() and int(raw) > 0 else None
+        _max_retries_loaded = True
+        if _max_retries:
+            print(f"[GUARD] Retry cap active at {_max_retries} attempts per call")
+    return _max_retries if _max_retries else default
+
+
 def check_prompt_fits(prompt, role, call_id, log_dir):
     """
     Warn when a prompt is about to overflow the model's context window.
@@ -116,6 +138,7 @@ def timed_llm_call(client, api_provider, model, prompt, role, call_id, max_token
     """
     start_time = time.time()
     prompt_time = time.time()
+    retries_on_timeout = _get_max_retries(retries_on_timeout)
     
     print(f"[{role.upper()}] Starting call {call_id}...")
     
