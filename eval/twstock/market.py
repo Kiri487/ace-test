@@ -157,6 +157,21 @@ def decision_dates(start, count, step=STEP_DAYS):
     return out
 
 
+def snap(date):
+    """The last trading day on or before `date`.
+
+    searchsorted on a date the market was closed returns the *next* bar, so
+    passing a holiday straight into holding_window would quietly shift entry a
+    day later than intended. Every caller that turns a date into a position goes
+    through here instead.
+    """
+    idx = trading_days()
+    p = idx.searchsorted(date, side="right") - 1
+    if p < 0:
+        raise ValueError(f"no trading day on or before {date}")
+    return idx[p]
+
+
 def holding_window(date):
     """(entry_date, exit_date) for a decision made at `date`.
 
@@ -165,15 +180,18 @@ def holding_window(date):
     look-ahead.
     """
     idx = trading_days()
-    p = idx.searchsorted(date)
+    p = idx.searchsorted(snap(date))
+    if p + HOLD_DAYS >= len(idx):
+        raise ValueError(f"not enough trading days after {date} to hold {HOLD_DAYS}")
     return idx[p + 1], idx[p + 1 + HOLD_DAYS - 1]
 
 
 def universe(date):
     """Point-in-time top-N by market cap, as of `date`.
 
-    `is_largest` ranks within each row, so membership is recomputed for every
-    date - today's index composition never leaks backwards.
+    Ranking happens within the single row for `date`, so membership is
+    recomputed at every decision date and today's index composition never leaks
+    backwards. Verified 2026-09-03: the 2020, 2023 and 2026 lists differ.
     """
     mv = _frames()["market_value"]
     row = mv.loc[:date]

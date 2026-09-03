@@ -120,6 +120,10 @@ def describe():
         "  - negative:          該欄位小於 0",
         "",
         f"n 必須是 {MIN_N} 到 {MAX_N} 之間的整數。filters 可以是空的。",
+        "多個 filter 之間是 AND(必須同時滿足),而且每個百分位都是相對於「完整的 "
+        "50 檔股票池」計算,不是相對於前一個 filter 篩剩下的。所以 filter 的先後"
+        "順序不影響結果。",
+        f"篩選後若少於 {MIN_SELECTED} 檔,這條規則會被判為無效。",
     ]
     return "\n".join(lines)
 
@@ -132,7 +136,6 @@ def random_rule(rng=None):
     is bounded.
     """
     rng = rng or random
-    zero_fields = [f for f, spec in FIELD_SPECS.items() if spec[2]]
     filters = []
     for field in rng.sample(list(FIELD_NAMES), rng.randint(0, 3)):
         if FIELD_SPECS[field][2] and rng.random() < 0.5:
@@ -141,7 +144,6 @@ def random_rule(rng=None):
             filters.append({"field": field,
                             "op": rng.choice(list(PCT_OPS)),
                             "value": rng.choice([20, 30, 50, 70])})
-    del zero_fields
     return {
         "filters": filters,
         "rank_by": rng.choice(list(FIELD_NAMES)),

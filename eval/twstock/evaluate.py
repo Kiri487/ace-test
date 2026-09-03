@@ -97,12 +97,16 @@ def evaluate_rule(rule, date, use_sim=True):
         out.update(valid=False, error=str(e), correct=False)
         return out
 
+    # Computed once and reused: the direct figures are reported alongside the
+    # sim figures so the cost gap stays visible, and they are the scored numbers
+    # when use_sim is off.
+    rule_direct = direct_return(picked, entry, exit_)
+    bench_direct = direct_return(members, entry, exit_)
     if use_sim:
         rule_ret, _ = sim_return(picked, entry, exit_)
         bench_ret, _ = sim_return(members, entry, exit_)
     else:
-        rule_ret = direct_return(picked, entry, exit_)
-        bench_ret = direct_return(members, entry, exit_)
+        rule_ret, bench_ret = rule_direct, bench_direct
 
     out.update(
         valid=True,
@@ -112,7 +116,7 @@ def evaluate_rule(rule, date, use_sim=True):
         benchmark_return=round(bench_ret, 6),
         excess=round(rule_ret - bench_ret, 6),
         correct=rule_ret > bench_ret,
-        rule_return_direct=round(direct_return(picked, entry, exit_), 6),
-        benchmark_return_direct=round(direct_return(members, entry, exit_), 6),
+        rule_return_direct=round(rule_direct, 6),
+        benchmark_return_direct=round(bench_direct, 6),
     )
     return out
