@@ -237,6 +237,17 @@ def timed_llm_call(client, api_provider, model, prompt, role, call_id, max_token
             if hasattr(openai, 'InternalServerError') and isinstance(e, openai.InternalServerError):
                 is_server_error = True
                 print(f"[{role.upper()}] OpenAI InternalServerError detected")
+
+            # A 5xx is the infrastructure failing, not the model returning
+            # nothing, and must be retried rather than scored as a wrong answer.
+            # The two were being conflated because a gateway can word its 500 as
+            # "empty response content", which matches the is_empty_response
+            # heuristic above - and that branch returns before the retry logic
+            # is ever reached. Measured 2026-09-03: all 9 gateway 500s in a
+            # clinepass run were silently marked incorrect, 5 of them inside a
+            # single final test, costing that run about 5 accuracy points.
+            if is_server_error:
+                is_empty_response = False
             
             # Debug empty response issues
             if is_empty_response:
