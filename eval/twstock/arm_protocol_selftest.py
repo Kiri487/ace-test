@@ -12,26 +12,43 @@ Pass criteria, all must hold:
  6. write_run stores a void date with no score and a complete date with all 50, and
     refuses a void date that carries scores and a non-void date that lacks some
  7. void_summary counts per arm: points, voids, retries, forms over every attempt
+ 8. an out-of-universe key voids the point even with all 50 scored, as its own kind
+ 9. a duplicated score key voids the point (object form, JSON-string form, and a
+    collision after stripping whitespace); a repeated "reasoning" key does not
+10. when both apply, the named reason is out_of_universe_key and both kinds are kept
+11. Reflector/Curator calls follow the same retry rule and are recorded on their own;
+    a Reflector that fails after its retries means no Curator call
+12. a void decision is skipped at maturity with no call; A1's window leaves its slot
+    empty instead of reaching further back
+13. the record refuses learning calls on a skipped maturity; learning_summary counts
+    skips, failures and playbook updates apart from generation voids
 Exit status 1 on the first failure.
 """
 
 import json
 import sys
 import tempfile
+import warnings
 
-import numpy as np
 import pandas as pd
 
 from . import arm_protocol as ap
 from . import records
 
+warnings.filterwarnings("ignore", category=FutureWarning)
+
 U = [str(1101 + i) for i in range(50)]
 HORIZONS = (5, 10, 20, 40)
 
 
-def answer(form="object", drop=0, override=None):
+def score_dict(drop=0, override=None):
     scores = {s: round(((i % 21) - 10) / 10, 1) for i, s in enumerate(U[:len(U) - drop])}
     scores.update(override or {})
+    return scores
+
+
+def answer(form="object", drop=0, override=None):
+    scores = score_dict(drop, override)
     fa = scores if form == "object" else json.dumps(scores)
     return json.dumps({"reasoning": "r", "bullet_ids": [], "final_answer": fa})
 
@@ -40,7 +57,7 @@ def scripted(outputs):
     """A call that replays outputs in order; an Exception instance is raised."""
     log = []
 
-    def call(attempt_no):
+    def call(attempt_no, *_):
         log.append(attempt_no)
         item = outputs[min(len(log), len(outputs)) - 1]
         if isinstance(item, Exception):
@@ -68,6 +85,14 @@ def synthetic_panel(dates):
                 row[f"mature_date_h{h}"] = t + pd.Timedelta(days=h + 1)
             rows.append(row)
     return pd.DataFrame(rows)
+
+
+def refuses(fn):
+    try:
+        fn()
+        return False
+    except ValueError:
+        return True
 
 
 def main():
@@ -132,33 +157,125 @@ def main():
               and m.loc[dates[1], "void_reason"] == "incomplete"
               and len(json.loads(m.loc[dates[1], "attempts_json"])) == 3
               and dec.loc[dec["decision_date"] == dates[1], "score"].isna().all())
-        check("6 manifest counts voids, schema 2", man["voided_decision_points"] == 1
-              and man["schema_version"] == 2)
+        check("6 manifest counts voids, schema 3", man["voided_decision_points"] == 1
+              and man["schema_version"] == 3)
         summary = ap.void_summary(meta)
 
     with tempfile.TemporaryDirectory() as tmp:
         bad = pd.concat([ap.score_rows(dates[0], good), ap.score_rows(dates[1], good)], ignore_index=True)
-        try:
-            records.write_run(tmp, pnl, bad, "A0", llm_meta=[ap.meta_row(dates[0], good), ap.meta_row(dates[1], void)])
-            refused = False
-        except ValueError:
-            refused = True
-        check("6 refuses a void date that carries scores", refused)
+        check("6 refuses a void date that carries scores", refuses(lambda: records.write_run(
+            tmp, pnl, bad, "A0", llm_meta=[ap.meta_row(dates[0], good), ap.meta_row(dates[1], void)])))
     with tempfile.TemporaryDirectory() as tmp:
-        partial = ap.score_rows(dates[0], good).iloc[:49]
-        partial = pd.concat([partial, ap.score_rows(dates[1], void)], ignore_index=True)
-        try:
-            records.write_run(tmp, pnl, partial, "A0", llm_meta=meta_rows)
-            refused = False
-        except ValueError:
-            refused = True
-        check("6 refuses a non-void date missing a member's score", refused)
+        partial = pd.concat([ap.score_rows(dates[0], good).iloc[:49], ap.score_rows(dates[1], void)], ignore_index=True)
+        check("6 refuses a non-void date missing a member's score",
+              refuses(lambda: records.write_run(tmp, pnl, partial, "A0", llm_meta=meta_rows)))
 
     # 7. summary
     row = summary.iloc[0]
     check("7 void_summary per arm", row["decision_points"] == 2 and row["voided"] == 1
           and row["retries_spent"] == 2 and row["points_needing_retry"] == 1
           and row["attempt_forms"] == {"json_string": 1, "object": 3}, row.to_dict())
+
+    # 8. out-of-universe key with all 50 scored
+    call, log = scripted([answer("object", override={"9999": 0.1})])
+    o8 = ap.run_decision(call, U)
+    check("8 out-of-universe key voids with its own kind", o8["voided"] and o8["void_reason"] == "out_of_universe_key"
+          and o8["void_kinds"] == ["out_of_universe_key"] and o8["attempts"][0]["n_scored_in_range"] == 50
+          and len(log) == 3)
+
+    # 9. duplicated keys
+    dup_object = answer("object").replace('"final_answer": {"', f'"final_answer": {{"{U[0]}": 0.5, "', 1)
+    call, _ = scripted([dup_object])
+    o9a = ap.run_decision(call, U)
+    inner = json.dumps(score_dict())
+    dup_string = json.dumps({"reasoning": "r", "bullet_ids": [], "final_answer": f'{{"{U[0]}": 0.5, ' + inner[1:]})
+    call, _ = scripted([dup_string])
+    o9b = ap.run_decision(call, U)
+    call, _ = scripted([answer("object", override={" " + U[0]: 0.4})])
+    o9c = ap.run_decision(call, U)
+    call, _ = scripted([answer("object").replace('{"reasoning": "r"', '{"reasoning": "r", "reasoning": "r2"', 1)])
+    o9d = ap.run_decision(call, U)
+    check("9 duplicate key inside an object answer voids", o9a["voided"] and o9a["void_reason"] == "duplicate_key"
+          and o9a["attempts"][0]["duplicate_keys"] == [U[0]])
+    check("9 duplicate key inside a JSON-string answer voids", o9b["voided"] and o9b["void_reason"] == "duplicate_key")
+    check("9 whitespace collision counts as duplicate", o9c["voided"] and o9c["void_reason"] == "duplicate_key")
+    check("9 repeated reasoning key is recorded but usable", not o9d["voided"]
+          and o9d["attempts"][0]["other_duplicate_keys"] == ["reasoning"])
+
+    # 10. both non-compliance and incomplete
+    call, _ = scripted([answer("object", drop=1, override={"9999": 0.1})])
+    o10 = ap.run_decision(call, U)
+    check("10 named reason out_of_universe_key, both kinds kept", o10["void_reason"] == "out_of_universe_key"
+          and o10["void_kinds"] == ["out_of_universe_key", "incomplete"])
+
+    # 11. learning calls
+    refl, refl_log = scripted([RuntimeError("500"), "", json.dumps({"reasoning": "x", "bullet_tags": []})])
+    seen = []
+
+    def curate(n, reflection):
+        seen.append(reflection)
+        return {"response": json.dumps({"operations": []})}
+    mat_ok = ap.process_maturity(dates[0], False, refl, curate)
+    check("11 Reflector retried under the same rule, then Curator gets its reflection",
+          mat_ok["reflector"]["status"] == "ok" and mat_ok["reflector"]["n_retries"] == 2
+          and [a["failure"] for a in mat_ok["reflector"]["attempts"]] == ["call_error", "empty", None]
+          and mat_ok["curator"]["status"] == "ok" and seen and json.loads(seen[0])["reasoning"] == "x")
+    refl_bad, _ = scripted(["not json"])
+    cur_log = []
+    mat_fail = ap.process_maturity(dates[0], False, refl_bad, lambda n, r: cur_log.append(n) or {"response": "{}"})
+    check("11 Reflector failing after retries: no Curator call", mat_fail["reflector"]["status"] == "failed"
+          and mat_fail["reflector"]["n_attempts"] == 3 and mat_fail["curator"] is None and cur_log == [])
+    cur_bad, cur_bad_log = scripted([RuntimeError("down")])
+    refl_one, _ = scripted([json.dumps({"reasoning": "x"})])
+    mat_cfail = ap.process_maturity(dates[0], False, refl_one, cur_bad)
+    check("11 Curator failure recorded apart", mat_cfail["curator"]["status"] == "failed"
+          and len(cur_bad_log) == 3)
+
+    # 12. void at maturity, window slots
+    never, never_log = scripted([json.dumps({})])
+    mat_skip = ap.process_maturity(dates[0], True, never, never)
+    check("12 void decision skipped at maturity, no call", mat_skip["maturity_status"] == "skipped_void"
+          and never_log == [])
+    check("12 no maturity before date index 11", ap.matured_index(10) is None and ap.matured_index(11) == 0)
+    voided = [False, True] + [False] * 30
+    kept, skipped = ap.window_indices(16, voided)
+    check("12 A1 window leaves the void slot empty", kept == [2, 3, 4, 5] and skipped == [1])
+    check("12 A1 window before any maturity is empty", ap.window_indices(10, voided) == ([], []))
+
+    # 13. learning fields on disk
+    a2_dates = pd.DatetimeIndex(["2026-05-01", "2026-05-04", "2026-05-05", "2026-05-06"])
+    pnl2 = synthetic_panel(a2_dates)
+    none_m = ap.process_maturity(None, False, never, never)
+    maturities = [none_m, mat_skip, mat_fail, mat_ok]
+    rows = [ap.meta_row(d, good, maturity=m) for d, m in zip(a2_dates, maturities)]
+    sc = pd.concat([ap.score_rows(d, good) for d in a2_dates], ignore_index=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        records.write_run(tmp, pnl2, sc, "A2", llm_meta=rows)
+        _, meta2, man2 = records.read_run(tmp)
+        ls = ap.learning_summary(meta2).iloc[0]
+        check("13 learning_summary counts apart from generation",
+              ls["maturities_due"] == 3 and ls["maturities_skipped_void"] == 1 and ls["reflector_ok"] == 1
+              and ls["reflector_failed"] == 1 and ls["curator_not_run_after_reflector_failure"] == 1
+              and ls["playbook_updates"] == 1 and ls["reflector_retries"] == 4, ls.to_dict())
+        check("13 manifest counts skipped maturities and learning failures",
+              man2["maturities_skipped_void"] == 1 and man2["reflector_failed"] == 1 and man2["curator_failed"] == 0)
+    forged = [dict(r) for r in rows]
+    forged[1]["reflector_status"] = "ok"
+    with tempfile.TemporaryDirectory() as tmp:
+        check("13 refuses a learning call on a skipped maturity",
+              refuses(lambda: records.write_run(tmp, pnl2, sc, "A2", llm_meta=forged)))
+    forged2 = [dict(r) for r in rows]
+    forged2[2]["curator_status"] = "ok"
+    with tempfile.TemporaryDirectory() as tmp:
+        check("13 refuses a Curator after a failed Reflector",
+              refuses(lambda: records.write_run(tmp, pnl2, sc, "A2", llm_meta=forged2)))
+    a1_rows = [ap.meta_row(d, good, window=([a2_dates[0]], [a2_dates[1]])) for d in a2_dates]
+    with tempfile.TemporaryDirectory() as tmp:
+        records.write_run(tmp, pnl2, sc, "A1", llm_meta=a1_rows)
+        _, meta3, man3 = records.read_run(tmp)
+        ls1 = ap.learning_summary(meta3).iloc[0]
+        check("13 A1 window skips counted", ls1["window_slots_skipped_void"] == 4
+              and man3["window_slots_skipped_void"] == 4)
     print("ALL PASS")
 
 

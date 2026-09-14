@@ -2,6 +2,11 @@
 
     .venv/bin/python -m eval.twstock.budget_estimate [--trial DIR]
 
+READ CAVEATS FIRST. The whole table assumes A2 makes about 3 calls per decision date,
+which rests on v8 §10.1 max_num_rounds = 1 - not formally decided. If multi-round
+refinement is kept (v8 worst case 14 calls per decision point) the whole table is
+invalid. Latency p90 is an interpolation over 5 calls and is not a tail estimate.
+
 Measured here: decision-date counts from the trading calendar; the A0 prompt of every
 decision date in both windows, rendered by the trial code and counted with the local
 DeepSeek-V4-Flash tokenizer (+26 JSON-mode tokens, 5/5 exact in the trial); an A1 window
@@ -42,7 +47,11 @@ from .decision_input import build_decision_input
 from .format_trial import QUESTION, company_names, load_tokenizer, render_context
 
 POST = ("2026-04-27", "2026-08-26")
-PRE = ("2025-01-02", "2025-12-31")
+# Pre-cutoff condition, decided 2026-09-14: 2025-01-02..04-30 (75 decision points), not all of
+# 2025. Most of 2025 lies after the best-estimate knowledge cutoff (mid-April 2025) and would
+# dilute the contamination upper bound; the pre-minus-post IC gap's SE rises ~26%, accepted
+# because the condition is descriptive. A2 learning steps: 64 here vs 74 post-cutoff.
+PRE = ("2025-01-02", "2025-04-30")
 SEEDS = 3
 DELAY = 11                    # h=10 feedback of date i is usable at date i+11 (v8 §5.1)
 WINDOW_K = 5
@@ -53,6 +62,23 @@ DEEPSEEK_RUNS = ["ace_run_20260903_113410_finer_offline", "ace_run_20260903_1201
                  "ace_run_20260903_121716_finer_offline", "ace_run_20260903_160524_twstock_offline"]
 QWEN_RUN = "ace_run_20260902_002452_finer_offline"
 REASONING_TRIAL = "trial_20260913_233145"   # same 04-27 prompt, reasoning mode
+
+CAVEATS = {
+    "a2_calls_per_decision": (
+        "THE WHOLE TABLE assumes A2 makes about 3 calls per decision date (1 generation, then 1 Reflector + "
+        "1 Curator per maturity, no regeneration). That rests on v8 §10.1 max_num_rounds = 1, which is NOT "
+        "formally decided. If multi-round refinement is kept (v8 worst case 14 calls per decision point) the "
+        "whole table is invalid - A2, the totals and the v8 bridge alike - not merely A2 a little higher."),
+    "p90_and_high_scenario": (
+        "Latency p90 is an interpolation over 5 trial calls, not a tail estimate. The high scenario takes the "
+        "generation length as the maximum of the same 5 calls, and Reflector/Curator lengths as p90 of FiNER "
+        "runs (another task). Every figure that cites p90 or the high scenario carries this limit."),
+    "prefill_not_modelled": (
+        "Time is completion tokens x seconds per completion token from ~12k-token trial prompts; the extra "
+        "prefill of longer A2 prompts is not modelled."),
+}
+HIGH_LIMIT = "p90/max over 5 trial calls; not a tail estimate (see caveats)"
+TABLE_DEPENDS_ON = "A2 ~3 calls/decision = v8 §10.1 max_num_rounds=1 (undecided); invalid if refinement kept"
 
 
 def pct(a, q):
@@ -84,10 +110,10 @@ def trial_inputs(trial_dir, ntok):
         reasoning_tokens.append(ntok(str(obj.get("reasoning", ""))))
     return {
         "calls": ok,
-        "latency_s": dist(t),
+        "latency_s": {**dist(t), "limit": "n=5; p90 is an interpolation, not a tail estimate"},
         "completion_tokens": dist(comp),
         "prompt_tokens": dist(prompt),
-        "s_per_completion_token": dist(t / comp),
+        "s_per_completion_token": {**dist(t / comp), "limit": "n=5; p90 is an interpolation, not a tail estimate"},
         "cost_api_vs_price_model": [(round(a, 7), round(b, 7)) for a, b in zip(cost_api, cost_model)],
         "final_answer_tokens": dist(fa_tokens),
         "reasoning_field_tokens": dist(reasoning_tokens),
@@ -292,13 +318,16 @@ def main():
 
     table = []
     for sc in scenarios:
+        limit = HIGH_LIMIT if sc == "high" else ""
         for cond in prompts:
             r = results[(sc, cond)]
             for arm in ("A0", "A1_one_call", "A1_two_calls", "A2"):
-                table.append({"scenario": sc, "condition": cond, **fmt_row(arm, r[arm], SEEDS)})
+                table.append({"scenario": sc, "condition": cond, **fmt_row(arm, r[arm], SEEDS),
+                              "limit": limit, "depends_on": TABLE_DEPENDS_ON})
             for a1 in ("A1_one_call", "A1_two_calls"):
                 total = r["A0"] + r[a1] + r["A2"]
-                table.append({"scenario": sc, "condition": cond, **fmt_row(f"total(A0+{a1}+A2)", total, SEEDS)})
+                table.append({"scenario": sc, "condition": cond, **fmt_row(f"total(A0+{a1}+A2)", total, SEEDS),
+                              "limit": limit, "depends_on": TABLE_DEPENDS_ON})
     tbl = pd.DataFrame(table)
 
     # sensitivity: move one assumption from mid to high, total over both conditions, A1 one call
@@ -318,15 +347,16 @@ def main():
         S[key] = scenarios["high"][key]
         h, c = total_hours_cost(S)
         sens.append({"assumption_to_high": key, "mid": scenarios["mid"][key], "high": scenarios["high"][key],
-                     "hours_delta": round(h - base_h, 1), "cost_delta": round(c - base_c, 2)})
+                     "hours_delta": round(h - base_h, 1), "cost_delta": round(c - base_c, 2),
+                     "limit": HIGH_LIMIT})
 
-    completion_all = {sc: sum(v[1] for cond in prompts for v in results[(sc, cond)].values()) for sc in scenarios}
     tail = {"per_call_latency_s": trial["latency_s"],
             "hours_if_every_call_at_p90_s_per_token": {
                 sc: round(sum((results[(sc, c)]["A0"] + results[(sc, c)]["A1_one_call"] + results[(sc, c)]["A2"])[1]
                               for c in prompts) * SEEDS * trial["s_per_completion_token"]["p90"] / 3600, 1)
                 for sc in scenarios},
-            "note": "trial n=5; p90 of 5 points is an interpolation, not an estimate of the tail"}
+            "limit": "trial n=5; p90 of 5 points is an interpolation and NOT a tail estimate; "
+                     "these hours are a what-if, not a tail bound"}
 
     v8_reference = {"decision_points": {"post": 82, "pre": 245}, "seconds_per_call": 45,
                     "calls_per_decision": {"A0": 1, "A1": 2, "A2": "5-14 (~10) + initial test"},
@@ -336,6 +366,7 @@ def main():
         v8_recomputed[cond] = round((n * (1 + 2 + 10) + n) * SEEDS * 45 / 3600, 1)
 
     out = {
+        "CAVEATS": CAVEATS,
         "created_at": _dt.datetime.now().isoformat(timespec="seconds"),
         "git": records.git_state(),
         "decision_dates": {k: {"count": int(len(d)), "first": str(d[0].date()), "last": str(d[-1].date())} for k, d in windows.items()},
@@ -347,27 +378,34 @@ def main():
         "a1_window": win,
         "ace_role_sizes_deepseek_runs": roles_ds,
         "playbook_growth": growth.to_dict(orient="records"),
-        "scenarios": scenarios,
+        "scenarios": {**scenarios, "high_limit": HIGH_LIMIT},
         "a2_playbook_tokens": {f"{sc}/{cond}": v for (sc, cond), v in playbooks.items()},
         "sensitivity_total_both_conditions_A1_one_call": sens,
-        "baseline_mid_total": {"hours": round(base_h, 1), "cost_usd_reference": round(base_c, 2)},
+        "baseline_mid_total": {"hours": round(base_h, 1), "cost_usd_reference": round(base_c, 2),
+                               "depends_on": TABLE_DEPENDS_ON},
         "tail": tail,
         "v8_reference": v8_reference,
         "v8_formula_recomputed_hours": v8_recomputed,
+        "table_depends_on": TABLE_DEPENDS_ON,
         "table": table,
     }
     dest = RESULTS / "budget" / f"budget_{_dt.datetime.now():%Y%m%d_%H%M%S}.json"
     dest.parent.mkdir(parents=True, exist_ok=True)
     records.to_json(out, dest)
 
-    pd.set_option("display.width", 200)
+    banner = "\n".join(f"!! {k}: {v}" for k, v in CAVEATS.items())
+    print("== CAVEATS\n" + banner)
+    pd.set_option("display.width", 250)
     for k in ("decision_dates", "a0_prompt_tokens", "context_tokens", "trial", "reasoning_mode_content_ratio",
               "templates", "a1_window", "ace_role_sizes_deepseek_runs", "scenarios", "a2_playbook_tokens",
               "baseline_mid_total", "tail", "v8_formula_recomputed_hours"):
         print(f"\n== {k}\n{json.dumps(out[k], ensure_ascii=False, default=str, indent=1)}")
     print("\n== playbook growth\n", growth.to_string(index=False))
-    print("\n== sensitivity (mid -> high, one assumption at a time)\n", pd.DataFrame(sens).to_string(index=False))
-    print("\n== budget table (x3 seeds)\n", tbl.to_string(index=False))
+    print("\n== sensitivity (mid -> high, one assumption at a time; high carries: " + HIGH_LIMIT + ")\n",
+          pd.DataFrame(sens).drop(columns=["limit"]).to_string(index=False))
+    print("\n== budget table (x3 seeds) - depends on: " + TABLE_DEPENDS_ON + "\n",
+          tbl.drop(columns=["depends_on"]).to_string(index=False))
+    print("\n== CAVEATS (repeated)\n" + banner)
     print("\nwritten to", dest)
 
 

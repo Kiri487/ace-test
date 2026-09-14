@@ -9,9 +9,11 @@ known-answer factors today, A0/A1/A2 later.
     <run_dir>/decision_meta.parquet  one row per decision_date
     <run_dir>/manifest.json          provenance for the run
 
-Schema 2 adds the output-handling protocol of eval.twstock.arm_protocol: the
-final_answer form, attempts and retries, and whether the date is void. A void
-date has no score at all; a date that is not void has every member scored.
+Schema 3 carries the output-handling protocol of eval.twstock.arm_protocol:
+generation attempts, retries and void kind; for A2 the maturity processed that day
+and the Reflector/Curator outcomes, counted apart from generation; for A1 the
+decisions actually in the window and the slots left empty by void decisions.
+A void date has no score at all; a date that is not void has every member scored.
 """
 
 import datetime as _dt
@@ -25,11 +27,12 @@ import pandas as pd
 from . import ic
 from .panel import HORIZONS, UNIVERSE_SIZE
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Filled by LLM arms; left null by the known-answer factors.
 LLM_FIELDS = {
+    # generation
     "llm_raw_output": "string",
     "prompt_tokens": "Int64",
     "completion_tokens": "Int64",
@@ -40,7 +43,21 @@ LLM_FIELDS = {
     "n_retries": "Int64",
     "voided": "boolean",
     "void_reason": "string",
+    "void_kinds": "string",
     "attempts_json": "string",
+    # A2 learning, counted apart from generation
+    "maturity_status": "string",          # none | processed | skipped_void
+    "matured_decision_date": "string",
+    "reflector_status": "string",         # ok | failed | not_run
+    "reflector_attempts": "Int64",
+    "reflector_retries": "Int64",
+    "curator_status": "string",           # ok | failed | not_run
+    "curator_attempts": "Int64",
+    "curator_retries": "Int64",
+    "aux_attempts_json": "string",
+    # A1 window
+    "window_decision_dates": "string",
+    "window_skipped_void": "Int64",
 }
 
 
@@ -73,8 +90,30 @@ def to_json(obj, path):
         encoding="utf-8")
 
 
+def _check_learning_fields(meta):
+    """A skipped or absent maturity makes no learning call; a failed Reflector means no Curator."""
+    ms, rs, cs = meta["maturity_status"], meta.get("reflector_status"), meta.get("curator_status")
+    known = ms.notna()
+    bad_status = meta.loc[known & ~ms.isin(["none", "processed", "skipped_void"]), "decision_date"]
+    if len(bad_status):
+        raise ValueError(f"unknown maturity_status on {list(bad_status)[:5]}")
+    if rs is None or cs is None:
+        raise ValueError("maturity_status needs reflector_status and curator_status")
+    no_call = known & ms.isin(["none", "skipped_void"]) & ((rs != "not_run") | (cs != "not_run"))
+    if no_call.any():
+        raise ValueError(f"learning calls recorded for a maturity that was absent or void: "
+                         f"{list(meta.loc[no_call, 'decision_date'])[:5]}")
+    processed = known & (ms == "processed")
+    bad_refl = processed & ~rs.isin(["ok", "failed"])
+    if bad_refl.any():
+        raise ValueError(f"processed maturity without a Reflector outcome: {list(meta.loc[bad_refl, 'decision_date'])[:5]}")
+    curated_after_fail = processed & (rs == "failed") & (cs != "not_run")
+    if curated_after_fail.any():
+        raise ValueError(f"Curator recorded after a failed Reflector: {list(meta.loc[curated_after_fail, 'decision_date'])[:5]}")
+
+
 def _fill_llm_meta(meta, llm_meta):
-    """Copy per-date LLM fields onto meta and enforce the void rule against the scores."""
+    """Copy per-date LLM fields onto meta and enforce the protocol against the scores."""
     lm = pd.DataFrame(llm_meta).copy()
     unknown = set(lm.columns) - set(LLM_FIELDS) - {"decision_date"}
     if unknown:
@@ -88,7 +127,7 @@ def _fill_llm_meta(meta, llm_meta):
     lm = lm.set_index("decision_date")
     keys = pd.to_datetime(meta["decision_date"])
     for name in lm.columns:
-        values = [None if pd.isna(v) else v for v in keys.map(lm[name])]
+        values = [None if not isinstance(v, (list, dict)) and pd.isna(v) else v for v in keys.map(lm[name])]
         meta[name] = pd.array(values, dtype=LLM_FIELDS[name])
 
     if "voided" in lm.columns:
@@ -100,6 +139,8 @@ def _fill_llm_meta(meta, llm_meta):
         bad_full = meta.loc[known & ~voided & (meta["n_scored"] != meta["n_universe"]), "decision_date"]
         if len(bad_full):
             raise ValueError(f"dates that are not void lack scores for some members: {list(bad_full)[:5]}")
+    if "maturity_status" in lm.columns:
+        _check_learning_fields(meta)
     return meta
 
 
@@ -162,12 +203,21 @@ def write_run(run_dir, panel, scores, arm, extra=None, horizons=HORIZONS, llm_me
         "ts_min_obs": ic.TS_MIN_OBS,
         "decision_dates": {"first": dates.min(), "last": dates.max(), "count": len(dates)},
         "output_protocol": ("arm_protocol: final_answer object or JSON string accepted and recorded; "
-                            "max 2 retries per decision point, every attempt recorded; "
-                            "a decision point still incomplete after retries is void as a whole"),
+                            "max 2 retries per decision point and per Reflector/Curator call, every attempt "
+                            "recorded; a decision point still unusable after retries (incomplete, duplicate "
+                            "key or out-of-universe key) is void as a whole; a void decision is skipped at "
+                            "maturity without replacement"),
         **(extra or {}),
     }
-    if llm_meta is not None and "voided" in meta.columns:
-        manifest["voided_decision_points"] = int(meta["voided"].fillna(False).astype(bool).sum())
+    if llm_meta is not None:
+        if meta["voided"].notna().any():
+            manifest["voided_decision_points"] = int(meta["voided"].fillna(False).astype(bool).sum())
+        if meta["maturity_status"].notna().any():
+            manifest["maturities_skipped_void"] = int((meta["maturity_status"] == "skipped_void").sum())
+            manifest["reflector_failed"] = int((meta["reflector_status"] == "failed").sum())
+            manifest["curator_failed"] = int((meta["curator_status"] == "failed").sum())
+        if meta["window_skipped_void"].notna().any():
+            manifest["window_slots_skipped_void"] = int(meta["window_skipped_void"].fillna(0).sum())
     to_json(manifest, run_dir / "manifest.json")
     return run_dir
 
