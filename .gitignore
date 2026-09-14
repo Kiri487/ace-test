@@ -1,6 +1,28 @@
 .venv/
-.env.example
 .env
 __pycache__/
 */__pycache__/
 results/
+
+# local run logs
+*.log
+
+# local outputs and data dumps (repo root only)
+/facts.txt
+/playbook_dump.txt
+/power_study.csv
+/test_table.txt
+
+# local probe scripts (repo root only)
+/probe_*.py
+/collect_facts.py
+/dump_test_table.py
+
+# local shell helpers (repo root only)
+/check_*.sh
+/setup_*.sh
+/run_*.sh
+/launch_smoke.sh
+/pin_pandas.sh
+/status.sh
+/timing.sh
