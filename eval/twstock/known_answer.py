@@ -12,7 +12,7 @@ the period has no leakage control, so they do not belong in the thesis.
            500-seed null distribution
   factors  momentum (20-day return rank) and value (earnings-yield rank)
 
-Both stages also report the distribution of daily csIC (v8 §10.1), and the run
+Both stages also report the distribution of daily csIC (v9 §10.1), and the run
 ends by printing the on-disk record schema.
 """
 

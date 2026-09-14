@@ -1,4 +1,4 @@
-"""csIC, tsIC and their uncertainty (v8 §6.1, §6.5). Spearman throughout.
+"""csIC, tsIC and their uncertainty (v9 §6.1, §6.5; Newey-West lag v9 §4.1.1). Spearman throughout.
 
 Everything works on date x stock matrices: rows are consecutive decision dates,
 columns are stocks, NaN where a stock is outside that date's universe or a value
@@ -7,10 +7,16 @@ never shifts the ranks on the other.
 
 Uncertainty:
   csIC  one value per date, so clustering by date is the plain standard error
-        over dates; overlapping windows are handled by Newey-West, lag h-1.
+        over dates; overlapping windows are handled by Newey-West, lag 1.5h (v9 §4.1.1;
+        h-1 and 2h are kept as variants).
   tsIC  per stock over time, averaged over stocks. Stocks share dates, so the
         standard error comes from a moving-block bootstrap over dates with
         block length h.
+  N_eff = valid dates / h. Below N_EFF_MIN_FOR_T every t statistic in a summary is
+        set to NaN and marked as having no inferential value (v9 §6.1): lag or block
+        length close to the sample makes the estimators fail (on the 85-date test
+        window at h=40, 56 matured dates, momentum printed NW t -13.4 at lag 2h and
+        value printed bootstrap t +50.6).
 """
 
 import math
@@ -21,6 +27,8 @@ import pandas as pd
 CS_MIN_PAIRS = 20    # a date with fewer valid (score, α) pairs gets csIC = NaN
 TS_MIN_OBS = 20      # a stock with fewer valid in-universe dates gets tsIC = NaN
 INCONCLUSIVE_THRESHOLDS = (0.10, 0.15, 0.20)
+N_EFF_MIN_FOR_T = 20
+NO_INFERENCE_NOTE = "不具推論價值 (N_eff < 20): t not reported"
 
 
 def to_matrix(panel, col, dates=None):
@@ -83,11 +91,16 @@ def newey_west(x, lag):
     return {"mean": float(v.mean()), "se": se, "t": t, "n": n, "lag": lag, "interior_nan": interior}
 
 
+def main_nw_lag(h):
+    """The Newey-West lag v9 §4.1.1 prescribes: 1.5h, rounded up."""
+    return int(math.ceil(1.5 * h))
+
+
 def nw_lags(h):
-    """Newey-West lags reported side by side. h-1 is the v8 §6.5 setting copied
-    from FinEvolveBench; 1.5h and 2h are conservative alternatives, because the
-    Bartlett kernel at lag h-1 under-covers overlapping h-day windows."""
-    return {"h-1": h - 1, "1.5h": int(math.ceil(1.5 * h)), "2h": 2 * h}
+    """Newey-West lags reported side by side. 1.5h is the v9 §4.1.1 setting and the
+    main t; h-1 (FinEvolveBench, the v8 setting) and 2h are kept as variants, because
+    the Bartlett kernel at lag h-1 under-covers overlapping h-day windows."""
+    return {"h-1": h - 1, "1.5h": main_nw_lag(h), "2h": 2 * h}
 
 
 def bartlett_recovery(h, lag):
@@ -132,7 +145,7 @@ def split_periods(dates):
 
 
 def cs_distribution(cs, n_pairs):
-    """Distribution of daily csIC, for choosing the feedback form (v8 §10.1)."""
+    """Distribution of daily csIC, for choosing the feedback form (v9 §10.1)."""
     v = cs.dropna()
     if v.empty:
         return {}
@@ -154,8 +167,10 @@ def cs_distribution(cs, n_pairs):
 
 
 def summarize(S, A, h, dates, n_boot=500, seed=0):
-    """Every number v8 §6.1 / §6.5 asks for, for one score, horizon and period.
+    """Every number v9 §6.1 / §6.5 asks for, for one score, horizon and period.
 
+    The main csIC t uses Newey-West lag 1.5h; every t is NaN when N_eff < 20, with
+    `inference` saying so. Standard errors are kept either way.
     Returns (summary dict, daily csIC series, per-stock tsIC series).
     """
     nan = float("nan")
@@ -166,35 +181,44 @@ def summarize(S, A, h, dates, n_boot=500, seed=0):
     S, A = S.loc[matured], A.loc[matured]
 
     cs, n_pairs = cs_ic(S, A)
-    nw = newey_west(cs, lag=h - 1)
+    lag = main_nw_lag(h)
+    nw = newey_west(cs, lag=lag)
     iid = newey_west(cs, lag=0)
     ts, n_obs = ts_ic(S, A)
     boot = ts_ic_bootstrap(S, A, block=h, n_boot=n_boot, seed=seed) if n_boot else np.array([])
     ts_mean = float(ts.mean()) if ts.notna().any() else nan
     ts_se = float(np.nanstd(boot, ddof=1)) if boot.size > 1 else nan
     n_valid = int(cs.notna().sum())
+    n_eff = n_valid / h
+    inferable = n_eff >= N_EFF_MIN_FOR_T
+
+    def t_or_nan(t):
+        return t if inferable else nan
+
     variants = {}
-    for name, lag in nw_lags(h).items():
-        r = newey_west(cs, lag=lag)
-        variants[name] = {"lag": lag, "se": r["se"], "t": r["t"],
-                          "bartlett_recovery_flat_ma": bartlett_recovery(h, lag)}
+    for name, var_lag in nw_lags(h).items():
+        r = newey_west(cs, lag=var_lag)
+        variants[name] = {"lag": var_lag, "se": r["se"], "t": t_or_nan(r["t"]),
+                          "bartlett_recovery_flat_ma": bartlett_recovery(h, var_lag)}
 
     summary = {
         "h": h,
         "n_decision_dates_in_period": int(len(dates)),
         "n_matured_dates": int(matured.sum()),
-        "n_eff": n_valid / h,
+        "n_eff": n_eff,
+        "inference": {"n_eff_min_for_t": N_EFF_MIN_FOR_T, "t_reported": bool(inferable),
+                      "note": None if inferable else NO_INFERENCE_NOTE},
         "cs": {
             "mean": nw["mean"],
-            "se_newey_west": nw["se"], "t_newey_west": nw["t"], "nw_lag": h - 1,
+            "se_newey_west": nw["se"], "t_newey_west": t_or_nan(nw["t"]), "nw_lag": lag,
             "nw_variants": variants,
-            "se_date_cluster": iid["se"], "t_date_cluster": iid["t"],
+            "se_date_cluster": iid["se"], "t_date_cluster": t_or_nan(iid["t"]),
             "n_dates_valid": n_valid, "interior_nan": nw["interior_nan"],
         },
         "ts": {
             "mean": ts_mean,
             "se_block_bootstrap": ts_se,
-            "t_block_bootstrap": ts_mean / ts_se if ts_se == ts_se and ts_se > 0 else nan,
+            "t_block_bootstrap": t_or_nan(ts_mean / ts_se if ts_se == ts_se and ts_se > 0 else nan),
             "block_length": h, "n_boot": int(boot.size),
             "n_stocks_valid": int(ts.notna().sum()),
             "n_stocks_below_min_obs": int(((n_obs > 0) & (n_obs < TS_MIN_OBS)).sum()),

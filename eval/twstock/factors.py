@@ -1,7 +1,7 @@
 """Known-answer scores for validating the evaluation layer. Not LLM arms.
 
 Each score is cross-sectional within that date's point-in-time universe and is
-mapped to [-1, 1] by rank, the output range of v8 §4.1. Nothing computed from
+mapped to [-1, 1] by rank, the output range of v9 §4.1. Nothing computed from
 these is a finding: they exist to check that α and IC behave as expected, over
 a period with no leakage control.
 """

@@ -1,4 +1,4 @@
-"""News data layer (v8 §4.1): tw_news_cnyes headlines per stock and decision date.
+"""News data layer (v9 §4.1): tw_news_cnyes headlines per stock and decision date.
 
     .venv/bin/python -m eval.twstock.news          build and write stock/market tables
 
@@ -21,7 +21,7 @@ Decisions fixed on 2026-09-13, recorded in news_config.json and every manifest:
   to the first session on or after its calendar date, so weekend and holiday
   articles join the next session's window instead of being dropped, and an
   article dated T - including one published after the close - is in T's window.
-  Entry is at the open of T+1 (v8 §4.2), after every article in the window.
+  Entry is at the open of T+1 (v9 §4.2), after every article in the window.
 """
 
 import datetime as _dt

@@ -8,7 +8,8 @@
 2. no future      every trading day since 2013, all stocks and market-level: no
                   article dated after T, none dated on or before the session
                   before T-4; broken down by boundary type
-3. completeness   v8 decision dates plus 200 random earlier days: the index
+3. completeness   all 2025 and test-window decision dates plus 200 random
+                  earlier days: the index
                   equals a brute-force selection by calendar dates
 4. closures       each market closure since 2024-06: the session before sees none
                   of the articles dated inside it, the session after sees all
@@ -31,6 +32,8 @@ import pandas as pd
 from . import news, panel, records
 
 RESULTS = []
+# Periods checked since 2026-09-13: all of 2025 is a superset of the v9 §5.0 pre-cutoff
+# window (2025-01-02..04-30), kept deliberately - a leakage check over more dates is stricter.
 V8_PERIODS = {"pre_cutoff_2025": ("2025-01-02", "2025-12-31"),
               "test_window": ("2026-04-27", "2026-08-26")}
 
@@ -220,7 +223,7 @@ def brute_pairs(stock_level, cal, T, universe, window):
 
 def completeness(index, n_random=200, seed=20260913):
     print("\n== 3. completeness: index == brute-force selection by calendar dates ==")
-    print("  criterion: identical (stock_id, article id) sets on 100% of dates - all v8")
+    print("  criterion: identical (stock_id, article id) sets on 100% of dates - all")
     print(f"  decision dates (2025, test window) plus {n_random} random trading days 2013-2024")
     cal = index.calendar
     dates = []
@@ -306,7 +309,7 @@ def n_filter(index, info):
 
 def halted(index):
     print("\n== 7. universe members without an open price on T ==")
-    print("  criteria: every universe member is a key of the per-stock output on every v8 date;")
+    print("  criteria: every universe member is a key of the per-stock output on every checked date;")
     print("  halted members get no article dated after T (the count of halted pairs is reported)")
     ao = panel.frame("adj_open")
     n_pairs, missing_keys, fut, examples = 0, 0, 0, []

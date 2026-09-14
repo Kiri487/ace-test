@@ -11,7 +11,8 @@ over from the 2026-09-13 date/key_date investigation (late ingestion, and
 articles dated a day earlier than their id neighbours).
 
 The full-history period exists only to check whether the "about 236 headlines /
-5.6k tokens" figure recorded before v8 reproduces, and under which reading.
+5.6k tokens" figure recorded before v8 (v9 §9 corrects it to 6.6k) reproduces,
+and under which reading.
 """
 
 import argparse

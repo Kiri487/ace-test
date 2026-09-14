@@ -1,11 +1,11 @@
-"""One decision point's input object (v8 §4.1; §5.1 step 2 "observe"). Data only.
+"""One decision point's input object (v9 §4.1; §5.1 step 2 "observe"). Data only.
 
     .venv/bin/python -m eval.twstock.decision_input --date 2026-06-01
 
 No prompt text lives here. How this object is rendered into the Generator's
-`context` slot depends on the A0 prompt definition, which v8 §10.1 (4) leaves
-open. `to_record()` is the JSON form, so the exact input of every decision can
-be written next to its scores (v8 §6.4).
+`context` slot is fixed by the A0 prompt definition (v9 §10.1 (四): the Generator
+prompt plus an empty playbook; rendered by format_trial.render_context). `to_record()` is the JSON form, so the exact input of every decision can
+be written next to its scores (v9 §6.4).
 
 Market-level articles are carried in their own field and are not part of the
 per-stock input; whether they are ever rendered is not decided.
@@ -31,7 +31,7 @@ class Headline:
 @dataclass
 class DecisionInput:
     decision_date: pd.Timestamp
-    entry_date: pd.Timestamp            # open of T+1, where alpha starts (v8 §4.2)
+    entry_date: pd.Timestamp            # open of T+1, where alpha starts (v9 §4.2)
     universe: list                      # [{"stock_id", "universe_rank"}], rank 1 = largest cap
     news_window: dict                   # sessions and calendar bounds actually used
     news_by_stock: dict                 # stock_id -> [Headline], every member present

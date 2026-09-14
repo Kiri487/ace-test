@@ -30,7 +30,7 @@ Learning calls (A2 Reflector and Curator)
 This must be the only retry layer. Run with ACE_MAX_RETRIES=1 and an OpenAI client
 with max_retries=0; otherwise retries happen below the attempts counted here.
 
-v8 §10.1, all five items settled (2026-09-14) - the M5a specification is complete
+v9 §10.1, all five items settled (2026-09-14) - the M5a specification is complete
 (二) Refinement off: MAX_NUM_ROUNDS = 1. At maturity the Reflector reflects once and the
     decision is never regenerated. After decoupling, refinement would mean regenerating a
     decision 11 trading days later with feedback that already contains realized returns;
@@ -46,7 +46,7 @@ v8 §10.1, all five items settled (2026-09-14) - the M5a specification is comple
     so there is no choice of which generation to freeze.
 (四) No initial test. A0 is its own arm, called interleaved by date, with the prompt
     "Generator prompt + empty playbook".
-(五) v8 §4.2.1 (a)/(b) only arises on an offline warm-up path, which is not used.
+(五) v9 §4.2.1 (a)/(b) only arises on an offline warm-up path, which is not used.
 """
 
 import json
@@ -61,7 +61,7 @@ FEEDBACK_CONTENT = (    # §10.1 (一): what the Reflector reads; continuous, no
     "the decision date's csIC",
     "that csIC's quantile in the pooled daily csIC of random scores (50 seeds x 399 dates, h=10 sd 0.144)",
 )
-DELAY = 11             # h=10 feedback of decision i is usable at decision date i+11 (v8 §5.1)
+DELAY = 11             # h=10 feedback of decision i is usable at decision date i+11 (v9 §5.1)
 WINDOW_K = 5            # A1: the last 5 matured decisions
 ACCEPTED_FORMS = ("object", "json_string")
 # order in which a failure is named when several apply; every applicable kind is kept too

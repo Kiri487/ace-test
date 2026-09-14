@@ -1,4 +1,4 @@
-"""On-disk record of one arm's decisions (v8 §6.4).
+"""On-disk record of one arm's decisions (v9 §6.4).
 
 A field not written on the first run can only be recovered by re-running
 everything, so the schema is fixed here and every arm writes through it - the
@@ -62,8 +62,8 @@ LLM_FIELDS = {
 
 
 # Reserved for the A2 driver (M5a): <run_dir>/playbook_bullets.parquet, one row per bullet
-# version, so every playbook entry can be traced to the maturity that produced it (v8 §6.4)
-# and classified later for memory health (v8 §6.3). Nothing writes it yet.
+# version, so every playbook entry can be traced to the maturity that produced it (v9 §6.4)
+# and classified later for memory health (v9 §6.3). Nothing writes it yet.
 #
 # specificity_class exists because the Reflector sees realized returns: entries may be
 # "memorised answers" bound to one ticker and one period ("TSMC is a good stock") instead of

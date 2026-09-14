@@ -1,4 +1,4 @@
-"""Price and universe panel for the evaluation layer (v8 §4.1, §4.2).
+"""Price and universe panel for the evaluation layer (v9 §4.1, §4.2).
 
 Deliberately separate from market.py. That module serves the screening-rule
 pipeline: a fixed 20-day holding window (HOLD_DAYS) and non-overlapping decision
@@ -50,7 +50,7 @@ def trading_days():
 
 
 def decision_dates(start, end):
-    """Every trading day in [start, end] - v8 decides daily."""
+    """Every trading day in [start, end] - v9 §4.1 decides daily."""
     idx = trading_days()
     return idx[(idx >= pd.Timestamp(start)) & (idx <= pd.Timestamp(end))]
 

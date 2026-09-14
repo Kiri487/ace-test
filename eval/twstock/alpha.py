@@ -1,4 +1,4 @@
-"""α(i, t, h): market-adjusted forward open-to-open return (v8 §4.2).
+"""α(i, t, h): market-adjusted forward open-to-open return (v9 §4.2).
 
     r(i, t, h) = open(i, t+1+h) / open(i, t+1) - 1
     α(i, t, h) = r(i, t, h) - r(equal_weight_top50, t, h)

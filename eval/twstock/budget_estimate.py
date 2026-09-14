@@ -1,11 +1,11 @@
-"""Inputs and arithmetic for the v8 §5.2.1 compute budget, per arm. No LLM call.
+"""Inputs and arithmetic for the v9 §5.2.1 compute budget, per arm. No LLM call.
 
     .venv/bin/python -m eval.twstock.budget_estimate [--trial DIR]
 
 READ CAVEATS FIRST. The whole table assumes A2 makes about 3 calls per decision date,
-which rests on v8 §10.1 max_num_rounds = 1 - not formally decided. If multi-round
-refinement is kept (v8 worst case 14 calls per decision point) the whole table is
-invalid. Latency p90 is an interpolation over 5 calls and is not a tail estimate.
+which rests on v9 §10.1 (二) max_num_rounds = 1 (decided 2026-09-14). Were multi-round
+refinement restored (the ACE loop's worst case 14 calls per decision point) the whole
+table would be invalid. Latency p90 is an interpolation over 5 calls and is not a tail estimate.
 
 Measured here: decision-date counts from the trading calendar; the A0 prompt of every
 decision date in both windows, rendered by the trial code and counted with the local
@@ -53,7 +53,7 @@ POST = ("2026-04-27", "2026-08-26")
 # because the condition is descriptive. A2 learning steps: 64 here vs 74 post-cutoff.
 PRE = ("2025-01-02", "2025-04-30")
 SEEDS = 3
-DELAY = 11                    # h=10 feedback of date i is usable at date i+11 (v8 §5.1)
+DELAY = 11                    # h=10 feedback of date i is usable at date i+11 (v9 §5.1)
 WINDOW_K = 5
 JSON_MODE_OVERHEAD = 26
 PRICE_IN, PRICE_OUT = 0.44e-6, 1.32e-6      # the reference price the usage "cost" field meters
@@ -66,9 +66,9 @@ REASONING_TRIAL = "trial_20260913_233145"   # same 04-27 prompt, reasoning mode
 CAVEATS = {
     "a2_calls_per_decision": (
         "THE WHOLE TABLE assumes A2 makes about 3 calls per decision date (1 generation, then 1 Reflector + "
-        "1 Curator per maturity, no regeneration). That rests on v8 §10.1 max_num_rounds = 1, which is NOT "
-        "formally decided. If multi-round refinement is kept (v8 worst case 14 calls per decision point) the "
-        "whole table is invalid - A2, the totals and the v8 bridge alike - not merely A2 a little higher."),
+        "1 Curator per maturity, no regeneration). That rests on v9 §10.1 (二) max_num_rounds = 1, decided "
+        "2026-09-14. Were multi-round refinement restored (the ACE loop's worst case 14 calls per decision "
+        "point) the whole table would be invalid - A2, the totals and the v8 bridge alike - not merely A2 a little higher."),
     "p90_and_high_scenario": (
         "Latency p90 is an interpolation over 5 trial calls, not a tail estimate. The high scenario takes the "
         "generation length as the maximum of the same 5 calls, and Reflector/Curator lengths as p90 of FiNER "
@@ -78,7 +78,7 @@ CAVEATS = {
         "prefill of longer A2 prompts is not modelled."),
 }
 HIGH_LIMIT = "p90/max over 5 trial calls; not a tail estimate (see caveats)"
-TABLE_DEPENDS_ON = "A2 ~3 calls/decision = v8 §10.1 max_num_rounds=1 (undecided); invalid if refinement kept"
+TABLE_DEPENDS_ON = "A2 ~3 calls/decision = v9 §10.1 (二) max_num_rounds=1 (decided); invalid if refinement were restored"
 
 
 def pct(a, q):
