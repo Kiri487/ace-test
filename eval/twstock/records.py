@@ -61,6 +61,36 @@ LLM_FIELDS = {
 }
 
 
+# Reserved for the A2 driver (M5a): <run_dir>/playbook_bullets.parquet, one row per bullet
+# version, so every playbook entry can be traced to the maturity that produced it (v8 §6.4)
+# and classified later for memory health (v8 §6.3). Nothing writes it yet.
+#
+# specificity_class exists because the Reflector sees realized returns: entries may be
+# "memorised answers" bound to one ticker and one period ("TSMC is a good stock") instead of
+# transferable judgement rules. It is filled by a later, separate classification pass.
+PLAYBOOK_BULLET_FIELDS = {
+    "arm": "string",
+    "bullet_id": "string",
+    "section": "string",
+    "content": "string",
+    "operation": "string",                   # ADD | UPDATE | DELETE, as applied by the Curator
+    "created_decision_date": "string",       # decision date on which the Curator call ran
+    "source_matured_decision_date": "string",  # the matured decision whose feedback produced it
+    "helpful_count": "Int64",
+    "harmful_count": "Int64",
+    "deleted_decision_date": "string",
+    "specificity_class": "string",           # transferable_rule | ticker_or_period_specific | mixed | unclassified
+    "specificity_note": "string",
+    "specificity_classified_by": "string",   # who or what assigned the class, and when
+}
+SPECIFICITY_CLASSES = ("transferable_rule", "ticker_or_period_specific", "mixed", "unclassified")
+
+
+def empty_bullet_table():
+    """Typed empty playbook_bullets table, so every writer starts from the same columns."""
+    return pd.DataFrame({k: pd.Series(dtype=v) for k, v in PLAYBOOK_BULLET_FIELDS.items()})
+
+
 def git_state():
     try:
         rev = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT,

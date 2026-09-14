@@ -29,6 +29,24 @@ Learning calls (A2 Reflector and Curator)
 
 This must be the only retry layer. Run with ACE_MAX_RETRIES=1 and an OpenAI client
 with max_retries=0; otherwise retries happen below the attempts counted here.
+
+v8 §10.1, all five items settled (2026-09-14) - the M5a specification is complete
+(二) Refinement off: MAX_NUM_ROUNDS = 1. At maturity the Reflector reflects once and the
+    decision is never regenerated. After decoupling, refinement would mean regenerating a
+    decision 11 trading days later with feedback that already contains realized returns;
+    it would almost always come out "right", and the playbook would store after-the-fact
+    rationalisation rather than transferable judgement. The budget's ~3 calls per decision
+    date rests on this.
+(一) Feedback is continuous, never a binary verdict (FEEDBACK_CONTENT): every stock's score
+    at the time with its realized alpha, the date's csIC, and that csIC's quantile in the
+    random-score distribution. No threshold, no three-way classes, no answer_is_correct-style
+    label. With refinement off, answer_is_correct controls nothing (no refinement to trigger,
+    no early stop), so the binary label is retired and (一) only decides what the Reflector reads.
+(三) IC is computed on the single generation of each decision date; nothing is regenerated,
+    so there is no choice of which generation to freeze.
+(四) No initial test. A0 is its own arm, called interleaved by date, with the prompt
+    "Generator prompt + empty playbook".
+(五) v8 §4.2.1 (a)/(b) only arises on an offline warm-up path, which is not used.
 """
 
 import json
@@ -37,7 +55,13 @@ import re
 import pandas as pd
 
 MAX_RETRIES = 2
-DELAY = 11              # h=10 feedback of decision i is usable at decision date i+11 (v8 §5.1)
+MAX_NUM_ROUNDS = 1      # §10.1 (二): single reflection at maturity, no regeneration
+FEEDBACK_CONTENT = (    # §10.1 (一): what the Reflector reads; continuous, no verdict label
+    "per stock: the score given on the decision date and its realized h=10 alpha",
+    "the decision date's csIC",
+    "that csIC's quantile in the pooled daily csIC of random scores (50 seeds x 399 dates, h=10 sd 0.144)",
+)
+DELAY = 11             # h=10 feedback of decision i is usable at decision date i+11 (v8 §5.1)
 WINDOW_K = 5            # A1: the last 5 matured decisions
 ACCEPTED_FORMS = ("object", "json_string")
 # order in which a failure is named when several apply; every applicable kind is kept too
