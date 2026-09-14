@@ -1,7 +1,9 @@
-"""Causal replay time structure for the three arms (v9 §5.1, §5.2.0, §10.1). M5a, part 1.
+"""Causal replay time structure for the three arms (v9.2 §5.1, §5.2.0, §10.1). M5a, part 1.
 
 Scheduling only: no LLM and no ACE role is called here. Generation, reflection and
-curation are injected callables; part 2 plugs in the real Generator / Reflector / Curator.
+curation are injected callables; part 2 (roles.py) plugs in the real Generator / Reflector /
+Curator and an ACE text playbook through `memories`, and the A2 memory decides in commit()
+what a finished maturity changes.
 
 Every trading day t, in this order:
   1. harvest  decisions whose mature_date == t release their h=10 outcome through an
@@ -147,6 +149,8 @@ class Decision:
     voided: bool
     scores: object               # read-only mapping, or None when void
     order_position: int
+    response: object = None      # raw text of the usable generation; None when void
+    bullet_ids: tuple = ()       # playbook bullets that generation cited
 
 
 @dataclass(frozen=True)
@@ -156,6 +160,8 @@ class Slot:
     voided: bool
     scores: object
     outcome: object
+    reasoning: object = None     # the generation's "reasoning" field, when it has one
+    matured_on: object = None
 
 
 @dataclass(frozen=True)
@@ -163,6 +169,7 @@ class PlaybookEntry:
     content: str
     source_decision_date: pd.Timestamp
     matured_on: pd.Timestamp
+    bullet_id: object = None
 
 
 class A0Memory:
@@ -203,6 +210,12 @@ class A2Playbook:
             self._entries.append(PlaybookEntry(str(op.get("content", "")),
                                                pd.Timestamp(source_decision_date), pd.Timestamp(matured_on)))
 
+    def commit(self, maturity, source_decision_date, matured_on):
+        """Apply a finished maturity: only a successful Curator changes the playbook."""
+        c = maturity["curator"]
+        if c is not None and c["status"] == "ok":
+            self.apply(json.loads(c["response"]).get("operations", []), source_decision_date, matured_on)
+
     def snapshot(self):
         return tuple(self._entries)
 
@@ -236,20 +249,34 @@ def _assert_no_future_feedback(arm, snapshot, day, calendar, delay):
             raise AssertionError(f"A2 on {day.date()} holds an entry that matured {item.matured_on.date()}")
 
 
+def _reasoning_of(response):
+    try:
+        obj = json.loads(response)
+    except (TypeError, ValueError):
+        return None
+    r = obj.get("reasoning") if isinstance(obj, dict) else None
+    return None if r is None else str(r)
+
+
 def run_replay(calendar, decision_dates, universe, generate, reflect, curate, outcomes, seed,
-               delay=DELAY, arms=ARMS):
+               delay=DELAY, arms=ARMS, memories=None,
+               reflector_check=ap.json_object_check, curator_check=ap.json_object_check):
     """Replay one condition.
 
+    universe: one list for every date, or a mapping decision date -> point-in-time list.
     generate(arm, decision_date, snapshot, attempt_no) -> {"response": str, ...}
     reflect(decision, realized, attempt_no)           -> {"response": str, ...}   (A2 only)
-    curate(snapshot, reflection, decision, attempt_no) -> {"response": JSON with "operations"}
+    curate(snapshot, reflection, decision, attempt_no) -> {"response": str, ...}
+    memories: fresh {"A0", "A1", "A2"} memory objects; the A2 one must offer commit(maturity,
+    source_decision_date, matured_on). Defaults to the part-1 stand-ins.
     """
     decision_dates = pd.DatetimeIndex(decision_dates)
     for d in decision_dates:
         calendar.position(d)
     index_of = {d: i for i, d in enumerate(decision_dates)}
     last_decision = decision_dates[-1]
-    memories = {"A0": A0Memory(), "A1": A1Window(), "A2": A2Playbook()}
+    if memories is None:
+        memories = {"A0": A0Memory(), "A1": A1Window(), "A2": A2Playbook()}
     res = ReplayResult(memories=memories)
     pending = []
 
@@ -276,17 +303,17 @@ def run_replay(calendar, decision_dates, universe, generate, reflect, curate, ou
                 mat = ap.process_maturity(
                     dec.decision_date, dec.voided,
                     lambda n, dec=dec, realized=realized: reflect(dec, realized, n),
-                    lambda n, reflection, dec=dec: curate(memories["A2"].snapshot(), reflection, dec, n))
-                if mat["curator"] is not None and mat["curator"]["status"] == "ok":
-                    ops = json.loads(mat["curator"]["response"]).get("operations", [])
-                    memories["A2"].apply(ops, dec.decision_date, day)
+                    lambda n, reflection, dec=dec: curate(memories["A2"].snapshot(), reflection, dec, n),
+                    reflector_check=reflector_check, curator_check=curator_check)
+                memories["A2"].commit(mat, dec.decision_date, day)
                 maturity_today["A2"] = mat
                 event["status"] = mat["maturity_status"]
                 event["reflector_status"] = mat["reflector"]["status"] if mat["reflector"] else "not_run"
                 event["curator_status"] = mat["curator"]["status"] if mat["curator"] else "not_run"
             elif dec.arm == "A1":
                 realized = None if dec.voided else view.realized(dec.decision_date)
-                memories["A1"].add(Slot(dec.decision_date, dec.voided, dec.scores, realized))
+                memories["A1"].add(Slot(dec.decision_date, dec.voided, dec.scores, realized,
+                                        reasoning=_reasoning_of(dec.response), matured_on=day))
                 event["status"] = "skipped_void" if dec.voided else "entered_window"
             else:
                 event["status"] = "no_memory"
@@ -301,11 +328,15 @@ def run_replay(calendar, decision_dates, universe, generate, reflect, curate, ou
             snapshot = memories[arm].snapshot()
             if arm in ("A1", "A2"):
                 _assert_no_future_feedback(arm, snapshot, day, calendar, delay)
+            members = universe[day] if isinstance(universe, dict) else universe
             outcome = ap.run_decision(
-                lambda n, arm=arm, snapshot=snapshot: generate(arm, day, snapshot, n), universe)
+                lambda n, arm=arm, snapshot=snapshot: generate(arm, day, snapshot, n), members)
             mature = calendar.shift(day, delay)
             scores = None if outcome["voided"] else MappingProxyType(dict(outcome["scores"]))
-            dec = Decision(arm, day, j, mature, outcome["voided"], scores, position)
+            last = outcome["attempts"][-1]
+            dec = Decision(arm, day, j, mature, outcome["voided"], scores, position,
+                           response=None if outcome["voided"] else last.get("response"),
+                           bullet_ids=() if outcome["voided"] else tuple(last.get("bullet_ids") or ()))
             res.decisions.append(dec)
             res.outcomes[(arm, day)] = outcome
             if mature is None:
