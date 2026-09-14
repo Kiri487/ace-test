@@ -2,15 +2,83 @@
 import os
 import re
 import json
+import threading
 import httpx
 import openai
 import tiktoken
+from datetime import datetime
 from dotenv import load_dotenv
 from typing import List, Dict, Any, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Load environment variables from .env file
 load_dotenv()
+
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+_provider_state = threading.local()
+_provider_log_lock = threading.Lock()
+
+
+def set_llm_call_context(call_id, role):
+    """Label requests made on this thread until end_llm_call_context()."""
+    _provider_state.context = {"call_id": call_id, "role": role}
+    _provider_state.record = None
+
+
+def end_llm_call_context():
+    """Clear the label and return the provider record of the last request on this thread."""
+    _provider_state.context = None
+    return getattr(_provider_state, "record", None)
+
+
+def provider_log_path():
+    """ACE_PROVIDER_LOG, else results/provider_log/provider_<date>.jsonl under the repo."""
+    return (os.getenv("ACE_PROVIDER_LOG", "").strip()
+            or os.path.join(_REPO_ROOT, "results", "provider_log",
+                            f"provider_{datetime.now():%Y%m%d}.jsonl"))
+
+
+def _log_provider_record(request, status, payload, body):
+    """Append one line per chat-completions HTTP response, SDK retries included.
+
+    The gateway routes one model slug across several hosts per call
+    (provider_metadata.gateway.routing), and the host can differ between
+    experiment arms; this log is the only record of which host served what.
+    A write failure is deliberately not caught: a run that cannot record its
+    hosts should stop rather than continue unaudited.
+    """
+    try:
+        sent = json.loads(request.content or b"{}")
+    except (ValueError, httpx.RequestNotRead):
+        sent = {}
+    data = payload.get("data") if isinstance(payload, dict) else None
+    data = data if isinstance(data, dict) else {}
+    choice = (data.get("choices") or [{}])[0]
+    metadata = (choice.get("message") or {}).get("provider_metadata")
+    routing = ((metadata or {}).get("gateway") or {}).get("routing") or {}
+    context = getattr(_provider_state, "context", None) or {}
+    record = {
+        "logged_at": datetime.now().isoformat(),
+        "call_id": context.get("call_id"),
+        "role": context.get("role"),
+        "http_status": status,
+        "request_model": sent.get("model"),
+        "generation_id": data.get("id"),
+        "echoed_model": data.get("model"),
+        "finish_reason": choice.get("finish_reason"),
+        "resolvedProvider": routing.get("resolvedProvider"),
+        "finalProvider": routing.get("finalProvider"),
+        "modelAttemptCount": routing.get("modelAttemptCount"),
+        "totalProviderAttemptCount": routing.get("totalProviderAttemptCount"),
+        "usage": data.get("usage"),
+        "provider_metadata": metadata,
+        "error_body": None if data.get("choices") else body[:4000].decode("utf-8", "replace"),
+    }
+    path = provider_log_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with _provider_log_lock, open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    _provider_state.record = record
 
 
 class _ClineUnwrapTransport(httpx.HTTPTransport):
@@ -25,20 +93,29 @@ class _ClineUnwrapTransport(httpx.HTTPTransport):
     Deliberately left alone: GET /models, whose {"data": [...]} already matches
     what the SDK expects (data is a list there, not a dict with choices), and
     any non-JSON or streamed body.
+
+    Every chat-completions response, JSON or not, is also written to the
+    provider log (see _log_provider_record) before it is unwrapped.
     """
 
     def handle_request(self, request):
         response = super().handle_request(request)
-        if "application/json" not in response.headers.get("content-type", ""):
+        content_type = response.headers.get("content-type", "")
+        is_chat = request.method == "POST" and request.url.path.endswith("/chat/completions")
+        is_json = "application/json" in content_type
+        if "text/event-stream" in content_type or not (is_json or is_chat):
             return response
 
         response.read()
         body = response.content
         status = response.status_code
         try:
-            payload = json.loads(body)
+            payload = json.loads(body) if is_json else None
         except ValueError:
             payload = None
+
+        if is_chat:
+            _log_provider_record(request, status, payload, body)
 
         if isinstance(payload, dict):
             data = payload.get("data")

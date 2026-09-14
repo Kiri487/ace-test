@@ -1,0 +1,14 @@
+{
+  "dataset": "tw_news_cnyes",
+  "time_field": "date",
+  "time_field_note": "cnyes publication time, Taipei local, calendar day only from 2025. key_date is finlab's ingestion time in UTC and is never used for slicing (decided 2026-09-13).",
+  "dedup_key": "cnyes article id parsed from url /news/id/<n>",
+  "dedup_keep": "latest calendar day of date; ties broken by latest key_date",
+  "market_level_max_ids": 50,
+  "market_level_rule": "an article whose stock_ids lists more than market_level_max_ids distinct tickers is market-level: kept in its own table, never in per-stock input",
+  "market_level_rationale": "equals the universe size (point-in-time top 50 by market cap); fixed 2026-09-13, not a tunable parameter",
+  "stock_ids_parse": "split on comma, strip, drop empty, de-duplicate",
+  "window_trading_days": 5,
+  "window_rule": "an article belongs to the first trading session on or after its calendar date; the window for decision date T is sessions T-4..T",
+  "calendar": "index of etl:adj_open"
+}

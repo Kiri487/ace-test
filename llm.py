@@ -13,6 +13,7 @@ import random
 from datetime import datetime
 import openai
 from logger import log_llm_call, log_problematic_request
+from utils import set_llm_call_context, end_llm_call_context
 
 
 _prompt_token_limit = None
@@ -146,6 +147,7 @@ def timed_llm_call(client, api_provider, model, prompt, role, call_id, max_token
     using_key_mixer = False
     
     while True:
+        provider_record = None
         try:
             # Get client
             active_client = client
@@ -170,7 +172,11 @@ def timed_llm_call(client, api_provider, model, prompt, role, call_id, max_token
             check_prompt_fits(prompt, role, call_id, log_dir)
 
             call_start = time.time()
-            response = active_client.chat.completions.create(**api_params)
+            set_llm_call_context(call_id, role)
+            try:
+                response = active_client.chat.completions.create(**api_params)
+            finally:
+                provider_record = end_llm_call_context()
             call_end = time.time()
             
             # Check if response is valid
@@ -198,6 +204,7 @@ def timed_llm_call(client, api_provider, model, prompt, role, call_id, max_token
                 "response_length": len(response_content),
                 "prompt_num_tokens": response.usage.prompt_tokens,
                 "response_num_tokens": response.usage.completion_tokens,
+                "provider": provider_record,
             }
             
             print(f"[{role.upper()}] Call {call_id} completed in {total_time:.2f}s")
@@ -294,7 +301,8 @@ def timed_llm_call(client, api_provider, model, prompt, role, call_id, max_token
                         "response_length": 0,
                         "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3],
                         "datetime": datetime.now().isoformat(),
-                        "training_marked_incorrect_due_to_empty_response": True
+                        "training_marked_incorrect_due_to_empty_response": True,
+                        "provider": provider_record,
                     }
                     if log_dir:
                         log_llm_call(log_dir, call_info)
@@ -319,7 +327,8 @@ def timed_llm_call(client, api_provider, model, prompt, role, call_id, max_token
                         "response_length": 0,
                         "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3],
                         "datetime": datetime.now().isoformat(),
-                        "test_marked_incorrect_due_to_empty_response": True
+                        "test_marked_incorrect_due_to_empty_response": True,
+                        "provider": provider_record,
                     }
                     if log_dir:
                         log_llm_call(log_dir, call_info)
@@ -361,6 +370,7 @@ def timed_llm_call(client, api_provider, model, prompt, role, call_id, max_token
                 "total_time": error_time - start_time,
                 "prompt_length": len(prompt),
                 "attempt": attempt,
+                "provider": provider_record,
             }
             
             print(f"[{role.upper()}] Call {call_id} failed after {error_time - start_time:.2f}s: {e}")
