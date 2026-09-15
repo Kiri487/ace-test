@@ -47,6 +47,21 @@ v9 §10.1, all five items settled (2026-09-14) - the M5a specification is comple
 (四) No initial test. A0 is its own arm, called interleaved by date, with the prompt
     "Generator prompt + empty playbook".
 (五) v9 §4.2.1 (a)/(b) only arises on an offline warm-up path, which is not used.
+
+A1 rolling window, decided by the user 2026-09-15 (settled; not to be reopened)
+    Format A1_WINDOW_FORMAT = "with_reasoning": each matured decision in the window carries every
+    member's score, its realized h=10 alpha and the reasoning the generation gave at the time -
+    about 2,455 tokens per decision (mean 2,490) and 12,466 for a full window of 5
+    (results/budget/budget_20260914_120638.json, v9.3 §5.2.1). One call per decision date, as the
+    driver is built: the window rides in the Generator's context.
+    Reason: information parity with A2. A1 is the baseline A2 has to beat; giving it outcomes
+    without the reasoning would weaken it before beating it and make an A2 win unconvincing.
+    A2's playbook is itself a product of reasoning, so the two memories must sit at the same
+    information level. The cost pushes the total toward the high scenario; the budget carries it.
+
+Cost (v9.3 §6.4): every attempt keeps the usage.cost the gateway metered with its answer;
+meta_row sums it per date (cost_usd for generation, aux_cost_usd for Reflector + Curator) and
+records.write_run unpacks every attempt into llm_calls.parquet.
 """
 
 import json
@@ -63,6 +78,12 @@ FEEDBACK_CONTENT = (    # §10.1 (一): what the Reflector reads; continuous, no
 )
 DELAY = 11             # h=10 feedback of decision i is usable at decision date i+11 (v9 §5.1)
 WINDOW_K = 5            # A1: the last 5 matured decisions
+A1_WINDOW_FORMAT = "with_reasoning"     # decided 2026-09-15, see the docstring
+A1_CALLS_PER_DECISION = 1               # the window rides in the Generator's context
+A1_WINDOW_FORMAT_REASON = (
+    "information parity with A2: A1 is the baseline A2 must beat, and outcomes without the reasoning "
+    "would weaken it before beating it; A2's playbook is itself a product of reasoning, so both "
+    "memories sit at the same information level")
 ACCEPTED_FORMS = ("object", "json_string")
 # order in which a failure is named when several apply; every applicable kind is kept too
 FAILURE_ORDER = ("call_error", "json", "final_answer_form", "duplicate_key", "out_of_universe_key", "incomplete")
@@ -311,6 +332,16 @@ def score_rows(decision_date, outcome):
                          "score": list(outcome["scores"].values())})
 
 
+def attempt_cost(attempt):
+    """usage.cost the gateway metered for one attempt; None when the call got no answer."""
+    return ((attempt.get("provider") or {}).get("usage") or {}).get("cost")
+
+
+def total_cost(attempts):
+    vals = [c for c in (attempt_cost(a) for a in attempts) if c is not None]
+    return float(sum(vals)) if vals else None
+
+
 def meta_row(decision_date, outcome, maturity=None, window=None):
     """One llm_meta row for records.write_run.
 
@@ -336,10 +367,12 @@ def meta_row(decision_date, outcome, maturity=None, window=None):
         "completion_tokens": total("completion_tokens"),
         "n_llm_calls": len(atts),
         "latency_s": total("latency_s"),
+        "cost_usd": total_cost(atts),
     }
     if maturity is not None:
         r, c = maturity["reflector"], maturity["curator"]
         md = maturity["matured_decision_date"]
+        aux = (r["attempts"] if r else []) + (c["attempts"] if c else [])
         row.update({
             "maturity_status": maturity["maturity_status"],
             "matured_decision_date": None if md is None else str(pd.Timestamp(md).date()),
@@ -349,8 +382,8 @@ def meta_row(decision_date, outcome, maturity=None, window=None):
             "curator_status": c["status"] if c else "not_run",
             "curator_attempts": c["n_attempts"] if c else 0,
             "curator_retries": c["n_retries"] if c else 0,
-            "aux_attempts_json": json.dumps((r["attempts"] if r else []) + (c["attempts"] if c else []),
-                                            ensure_ascii=False, default=str),
+            "aux_cost_usd": total_cost(aux),
+            "aux_attempts_json": json.dumps(aux, ensure_ascii=False, default=str),
         })
     if window is not None:
         kept, skipped = window

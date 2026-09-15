@@ -22,6 +22,9 @@ Pass criteria, all must hold:
     empty instead of reaching further back
 13. the record refuses learning calls on a skipped maturity; learning_summary counts
     skips, failures and playbook updates apart from generation voids
+14. cost (schema 4): meta_row sums usage.cost per date, generation and learning apart; write_run
+    writes one llm_calls row per attempt with its cost and provider routing, a call with no answer
+    carries no cost; the manifest counts the calls and totals cost by role
 Exit status 1 on the first failure.
 """
 
@@ -157,8 +160,8 @@ def main():
               and m.loc[dates[1], "void_reason"] == "incomplete"
               and len(json.loads(m.loc[dates[1], "attempts_json"])) == 3
               and dec.loc[dec["decision_date"] == dates[1], "score"].isna().all())
-        check("6 manifest counts voids, schema 3", man["voided_decision_points"] == 1
-              and man["schema_version"] == 3)
+        check("6 manifest counts voids, schema 4", man["voided_decision_points"] == 1
+              and man["schema_version"] == 4)
         summary = ap.void_summary(meta)
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -276,6 +279,39 @@ def main():
         ls1 = ap.learning_summary(meta3).iloc[0]
         check("13 A1 window skips counted", ls1["window_slots_skipped_void"] == 4
               and man3["window_slots_skipped_void"] == 4)
+
+    # 14. cost of every call (schema 4)
+    def priced(outputs, cost):
+        inner, _ = scripted(outputs)
+
+        def call(n, *rest):
+            out = inner(n, *rest)
+            return {**out, "call_id": f"call-a{n}",
+                    "provider": {"generation_id": f"gen-{n}-{cost}", "finalProvider": "fireworks", "usage": {"cost": cost}}}
+        return call
+    og = ap.run_decision(priced([RuntimeError("HTTP 500"), answer("object")], 0.01), U)
+    mat_c = ap.process_maturity(dates[0], False, priced([json.dumps({"reasoning": "x"})], 0.002),
+                                lambda n, r: priced([json.dumps({"operations": []})], 0.003)(n))
+    cost_rows = [ap.meta_row(dates[0], og, maturity=mat_c),
+                 ap.meta_row(dates[1], good, maturity=ap.process_maturity(None, False, None, None))]
+    sc14 = pd.concat([ap.score_rows(dates[0], og), ap.score_rows(dates[1], good)], ignore_index=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        records.write_run(tmp, pnl, sc14, "A2", llm_meta=cost_rows)
+        _, meta4, man4 = records.read_run(tmp)
+        calls = pd.read_parquet(f"{tmp}/llm_calls.parquet")
+    m4 = meta4.set_index("decision_date")
+    check("14 per-date cost: generation and learning apart; no answer, no cost",
+          abs(m4.loc[dates[0], "cost_usd"] - 0.01) < 1e-12 and abs(m4.loc[dates[0], "aux_cost_usd"] - 0.005) < 1e-12
+          and pd.isna(m4.loc[dates[1], "cost_usd"]) and pd.isna(m4.loc[dates[1], "aux_cost_usd"]), m4[["cost_usd", "aux_cost_usd"]])
+    g0 = calls[(calls["decision_date"] == dates[0]) & (calls["role"] == "generator")].sort_values("attempt")
+    aux4 = calls[calls["role"].isin(["reflector", "curator"])]
+    check("14 llm_calls: one row per attempt, cost per row, failed call has none",
+          len(calls) == 5 and list(g0["ok_call"]) == [False, True] and pd.isna(g0["cost_usd"].iloc[0])
+          and "HTTP 500" in g0["error"].iloc[0] and g0["cost_usd"].iloc[1] == 0.01
+          and sorted(aux4["role"]) == ["curator", "reflector"] and set(aux4["matured_decision_date"]) == {"2026-04-27"}
+          and set(aux4["finalProvider"]) == {"fireworks"}, calls.to_dict(orient="records"))
+    check("14 manifest: call count and cost by role", man4["llm_calls"] == 5
+          and man4["cost_usd_by_role"] == {"curator": 0.003, "generator": 0.01, "reflector": 0.002}, man4.get("cost_usd_by_role"))
     print("ALL PASS")
 
 

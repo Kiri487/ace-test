@@ -1,4 +1,4 @@
-"""Reflector feedback for A2 (v9.2 §4.4, §10.1 (一)). Three measured items, no verdict.
+"""Reflector feedback for A2 (v9.3 §4.4, §10.1 (一)). Three measured items, no verdict.
 
     .venv/bin/python -m eval.twstock.feedback --build-null     regenerate and verify the pooled null
 

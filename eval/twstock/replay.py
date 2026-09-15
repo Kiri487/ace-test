@@ -1,4 +1,4 @@
-"""Causal replay time structure for the three arms (v9.2 §5.1, §5.2.0, §10.1). M5a, part 1.
+"""Causal replay time structure for the three arms (v9.3 §5.1, §5.2.0, §10.1). M5a, part 1.
 
 Scheduling only: no LLM and no ACE role is called here. Generation, reflection and
 curation are injected callables; part 2 (roles.py) plugs in the real Generator / Reflector /
@@ -44,7 +44,12 @@ from . import arm_protocol as ap
 ARMS = ("A0", "A1", "A2")
 DELAY = ap.DELAY          # 11 sessions
 WINDOW_K = ap.WINDOW_K    # A1 keeps the last 5 maturity slots
-# v9 §5.0, phase one
+# v9.3 §5.0, phase one. The single source for both windows: budget_estimate reads it from here.
+# Pre-cutoff condition, decided 2026-09-14: 2025-01-02..04-30 (75 decision points), not all of
+# 2025. Most of 2025 lies after the best-estimate knowledge cutoff (mid-April 2025) and would
+# dilute the contamination upper bound; the pre-minus-post IC gap's SE rises ~26%, accepted
+# because the condition is descriptive. A2 learning steps: 64 here vs 74 post-cutoff.
+# (news_selfcheck and news_stats keep all of 2025 on purpose: a leakage check over a superset.)
 CONDITIONS = {"post": ("2026-04-27", "2026-08-26"), "pre": ("2025-01-02", "2025-04-30")}
 
 # Arm-order seed, chosen 2026-09-14 by a rule fixed before searching: the smallest
@@ -71,11 +76,17 @@ def arm_order_uniformity(seed, n_dates, arms=None):
 
 
 def manifest_fields(seed=ARM_ORDER_SEED):
-    """Arm-order provenance for records.write_run(extra=...)."""
+    """Arm-order and arm-protocol provenance for records.write_run(extra=...)."""
     return {"arm_order_seed": seed, "arm_order_seed_rule": ARM_ORDER_SEED_RULE,
             "arm_order_seed_reason": ARM_ORDER_SEED_REASON,
             "arm_order_uniformity": {label: arm_order_uniformity(seed, n)
-                                     for label, n in (("post_85", 85), ("pre_75", 75))}}
+                                     for label, n in (("post_85", 85), ("pre_75", 75))},
+            "conditions": CONDITIONS,
+            "a1_window": {"k": WINDOW_K, "format": ap.A1_WINDOW_FORMAT,
+                          "calls_per_decision": ap.A1_CALLS_PER_DECISION,
+                          "decided": "2026-09-15 (user)", "reason": ap.A1_WINDOW_FORMAT_REASON,
+                          "tokens_reference": "about 2,455 per decision (mean 2,490), 12,466 for a full window of 5; "
+                                              "results/budget/budget_20260914_120638.json"}}
 
 
 class LookaheadError(LookupError):

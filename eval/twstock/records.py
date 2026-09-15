@@ -8,12 +8,17 @@ known-answer factors today, A0/A1/A2 later.
                                      whole universe with its score, not a selection
     <run_dir>/decision_meta.parquet  one row per decision_date
     <run_dir>/manifest.json          provenance for the run
+    <run_dir>/llm_calls.parquet      one row per LLM request attempt (LLM arms only)
 
 Schema 3 carries the output-handling protocol of eval.twstock.arm_protocol:
 generation attempts, retries and void kind; for A2 the maturity processed that day
 and the Reflector/Curator outcomes, counted apart from generation; for A1 the
 decisions actually in the window and the slots left empty by void decisions.
 A void date has no score at all; a date that is not void has every member scored.
+
+Schema 4 adds the cost of every call (v9.3 §6.4 "每次 LLM 呼叫的 token 數與成本"): cost_usd and
+aux_cost_usd per date, and llm_calls.parquet with tokens, latency, usage.cost and the provider
+routing of each attempt. Before schema 4 cost sat only in the provider log and inside attempts_json.
 """
 
 import datetime as _dt
@@ -25,10 +30,14 @@ import numpy as np
 import pandas as pd
 
 from . import ic
+from .arm_protocol import attempt_cost
 from .panel import HORIZONS, UNIVERSE_SIZE
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 REPO_ROOT = Path(__file__).resolve().parents[2]
+COST_SOURCE = ("usage.cost of each answered call as the gateway metered it (ClinePass quota metering at the "
+               "reference price, not cash); a call that got no answer carries none - its HTTP status is in the "
+               "provider log")
 
 # Filled by LLM arms; left null by the known-answer factors.
 LLM_FIELDS = {
@@ -38,6 +47,7 @@ LLM_FIELDS = {
     "completion_tokens": "Int64",
     "n_llm_calls": "Int64",
     "latency_s": "Float64",
+    "cost_usd": "Float64",                # sum over this date's generation attempts
     "final_answer_form": "string",
     "n_attempts": "Int64",
     "n_retries": "Int64",
@@ -54,10 +64,38 @@ LLM_FIELDS = {
     "curator_status": "string",           # ok | failed | not_run
     "curator_attempts": "Int64",
     "curator_retries": "Int64",
+    "aux_cost_usd": "Float64",            # sum over the Reflector and Curator attempts
     "aux_attempts_json": "string",
     # A1 window
     "window_decision_dates": "string",
     "window_skipped_void": "Int64",
+}
+
+# <run_dir>/llm_calls.parquet: one row per request attempt, unpacked from attempts_json and
+# aux_attempts_json, so the per-call rows and the per-date totals come from the same records.
+PROVIDER_CALL_FIELDS = ("generation_id", "http_status", "finish_reason", "finalProvider", "resolvedProvider",
+                        "modelAttemptCount", "totalProviderAttemptCount")
+LLM_CALL_FIELDS = {
+    "arm": "string",
+    "decision_date": "datetime64[ns]",
+    "role": "string",                     # generator | reflector | curator
+    "matured_decision_date": "string",    # reflector / curator: the decision whose feedback was processed
+    "call_id": "string",
+    "attempt": "Int64",
+    "ok_call": "boolean",
+    "failure": "string",
+    "error": "string",
+    "prompt_tokens": "Int64",
+    "completion_tokens": "Int64",
+    "latency_s": "Float64",
+    "cost_usd": "Float64",
+    "generation_id": "string",
+    "http_status": "Int64",
+    "finish_reason": "string",
+    "finalProvider": "string",
+    "resolvedProvider": "string",
+    "modelAttemptCount": "Int64",
+    "totalProviderAttemptCount": "Int64",
 }
 
 
@@ -89,6 +127,36 @@ SPECIFICITY_CLASSES = ("transferable_rule", "ticker_or_period_specific", "mixed"
 def empty_bullet_table():
     """Typed empty playbook_bullets table, so every writer starts from the same columns."""
     return pd.DataFrame({k: pd.Series(dtype=v) for k, v in PLAYBOOK_BULLET_FIELDS.items()})
+
+
+def _na(v):
+    return None if not isinstance(v, (list, dict)) and pd.isna(v) else v
+
+
+def llm_call_table(meta, arm):
+    """One row per request attempt of an LLM arm, unpacked from attempts_json and aux_attempts_json."""
+    rows = []
+    for m in meta.to_dict(orient="records"):
+        for col, role in (("attempts_json", "generator"), ("aux_attempts_json", None)):
+            js = _na(m.get(col))
+            if js is None:
+                continue
+            for a in json.loads(js):
+                prov = a.get("provider") or {}
+                rows.append({
+                    "arm": arm, "decision_date": m["decision_date"], "role": role or a.get("role"),
+                    "matured_decision_date": None if role else _na(m.get("matured_decision_date")),
+                    "call_id": a.get("call_id"), "attempt": a.get("attempt"), "ok_call": a.get("ok_call"),
+                    "failure": a.get("failure"), "error": a.get("error"),
+                    "prompt_tokens": a.get("prompt_tokens"), "completion_tokens": a.get("completion_tokens"),
+                    "latency_s": a.get("latency_s"), "cost_usd": attempt_cost(a),
+                    **{k: prov.get(k) for k in PROVIDER_CALL_FIELDS}})
+    if not rows:
+        return pd.DataFrame({k: pd.Series(dtype=v) for k, v in LLM_CALL_FIELDS.items()})
+    df = pd.DataFrame(rows)
+    return pd.DataFrame({k: pd.to_datetime(df[k]) if dtype.startswith("datetime")
+                         else pd.array([_na(v) for v in df[k]], dtype=dtype)
+                         for k, dtype in LLM_CALL_FIELDS.items()})
 
 
 def git_state():
@@ -240,6 +308,12 @@ def write_run(run_dir, panel, scores, arm, extra=None, horizons=HORIZONS, llm_me
         **(extra or {}),
     }
     if llm_meta is not None:
+        calls = llm_call_table(meta, arm)
+        calls.to_parquet(run_dir / "llm_calls.parquet", index=False)
+        by_role = calls.groupby("role")["cost_usd"].sum(min_count=1)
+        manifest["llm_calls"] = int(len(calls))
+        manifest["cost_usd_by_role"] = {k: (None if pd.isna(v) else float(v)) for k, v in by_role.items()}
+        manifest["cost_source"] = COST_SOURCE
         if meta["voided"].notna().any():
             manifest["voided_decision_points"] = int(meta["voided"].fillna(False).astype(bool).sum())
         if meta["maturity_status"].notna().any():

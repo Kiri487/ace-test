@@ -1,4 +1,4 @@
-"""Inputs and arithmetic for the v9 §5.2.1 compute budget, per arm. No LLM call.
+"""Inputs and arithmetic for the v9.3 §5.2.1 compute budget, per arm. No LLM call.
 
     .venv/bin/python -m eval.twstock.budget_estimate [--trial DIR]
 
@@ -10,20 +10,24 @@ table would be invalid. Latency p90 is an interpolation over 5 calls and is not 
 Measured here: decision-date counts from the trading calendar; the A0 prompt of every
 decision date in both windows, rendered by the trial code and counted with the local
 DeepSeek-V4-Flash tokenizer (+26 JSON-mode tokens, 5/5 exact in the trial); an A1 window
-rendered from the trial's real scores and realized alpha; ACE template sizes; Reflector
-and Curator output sizes and playbook growth from the earlier ACE runs on disk.
+rendered from the trial's real scores, realized alpha and reasoning; ACE template sizes;
+Reflector and Curator output sizes and playbook growth from the earlier ACE runs on disk.
 
-Assumed, each with a low / mid / high value printed next to the result: the A1 window
-format, the A2 playbook growth per curator call, how much longer Reflector/Curator
-output gets in non-reasoning mode, the share of the playbook passed as "bullets used",
-the A1 reflection length, and a retry allowance.
+Assumed, each with a low / mid / high value printed next to the result: the A2 playbook
+growth per curator call, how much longer Reflector/Curator output gets in non-reasoning
+mode, the share of the playbook passed as "bullets used", and a retry allowance.
+The A1 window is no longer a scenario variable: its format is decided (2026-09-15,
+arm_protocol.A1_WINDOW_FORMAT = "with_reasoning", one call per date), so every scenario uses
+the measured per-decision median with reasoning (2,455 tokens). The compact and two-call
+variants are gone from the table.
 
-Arm protocol assumed (arm-interleaving-protocol): A0 one generation per date; A1 the
-window of the last 5 matured decisions, as one call or CryptoTrade-style two calls;
+Arm protocol assumed (arm-interleaving-protocol): A0 one generation per date; A1 one
+generation per date whose context carries the last 5 matured decisions with their reasoning;
 A2 one generation per date plus, from the 12th date on, one Reflector and one Curator
 call for the decision that matured - no regeneration, no multi-round refinement.
 Latency = completion tokens x seconds per completion token measured in the trial;
 prefill time is not modelled (the trial prompts were all ~12k, so it cannot be separated).
+So the A1 window changes prompt tokens and cost here, not hours.
 """
 
 import argparse
@@ -42,16 +46,11 @@ from ace.prompts.generator import GENERATOR_PROMPT
 from ace.prompts.reflector import REFLECTOR_PROMPT
 
 from . import alpha, market, news, panel, records
-from .arm_protocol import analyse
+from .arm_protocol import A1_CALLS_PER_DECISION, A1_WINDOW_FORMAT, analyse
 from .decision_input import build_decision_input
 from .format_trial import QUESTION, company_names, load_tokenizer, render_context
+from .replay import CONDITIONS          # the only place the two phase-one windows are written
 
-POST = ("2026-04-27", "2026-08-26")
-# Pre-cutoff condition, decided 2026-09-14: 2025-01-02..04-30 (75 decision points), not all of
-# 2025. Most of 2025 lies after the best-estimate knowledge cutoff (mid-April 2025) and would
-# dilute the contamination upper bound; the pre-minus-post IC gap's SE rises ~26%, accepted
-# because the condition is descriptive. A2 learning steps: 64 here vs 74 post-cutoff.
-PRE = ("2025-01-02", "2025-04-30")
 SEEDS = 3
 DELAY = 11                    # h=10 feedback of date i is usable at date i+11 (v9 §5.1)
 WINDOW_K = 5
@@ -75,7 +74,8 @@ CAVEATS = {
         "runs (another task). Every figure that cites p90 or the high scenario carries this limit."),
     "prefill_not_modelled": (
         "Time is completion tokens x seconds per completion token from ~12k-token trial prompts; the extra "
-        "prefill of longer A2 prompts is not modelled."),
+        "prefill of longer A1 and A2 prompts is not modelled - so A1's reasoning window (~12.5k tokens once "
+        "full) raises prompt tokens and cost in this table but not its hours."),
 }
 HIGH_LIMIT = "p90/max over 5 trial calls; not a tail estimate (see caveats)"
 TABLE_DEPENDS_ON = "A2 ~3 calls/decision = v9 §10.1 (二) max_num_rounds=1 (decided); invalid if refinement were restored"
@@ -228,18 +228,13 @@ def arm_runs(p, S, T):
     a0, ctx = p["prompt"].to_numpy(), p["context"].to_numpy()
     n = len(a0)
     spt, gen_c = S["s_per_tok"], S["gen_completion"]
-    out = {k: np.zeros(5) for k in ("A0", "A1_one_call", "A1_two_calls", "A2")}
+    out = {k: np.zeros(5) for k in ("A0", "A1", "A2")}
     for j in range(n):
         out["A0"] += call(a0[j], gen_c, spt)
 
-        k = min(WINDOW_K, max(0, j - DELAY + 1))
+        k = min(WINDOW_K, max(0, j - DELAY + 1))      # A1: one call, window with reasoning in its context
         window = k * S["a1_per_decision"] + (T["a1_header"] if k else 0)
-        out["A1_one_call"] += call(a0[j] + window, gen_c, spt)
-        if k:
-            out["A1_two_calls"] += call(S["a1_instruction"] + window, S["a1_reflection"], spt)
-            out["A1_two_calls"] += call(a0[j] + S["a1_reflection"], gen_c, spt)
-        else:
-            out["A1_two_calls"] += call(a0[j], gen_c, spt)
+        out["A1"] += call(a0[j] + window, gen_c, spt)
 
         m = max(0, j - DELAY + 1)          # matured decisions already folded into the playbook at j
         if j >= DELAY:
@@ -279,9 +274,11 @@ def main():
     roles_ds = role_sizes(DEEPSEEK_RUNS, ntok)
     growth = playbook_growth(ntok, tmpl["empty_playbook"])
 
+    if A1_WINDOW_FORMAT != "with_reasoning" or A1_CALLS_PER_DECISION != 1:
+        raise RuntimeError("arm_runs models A1 as one call with the reasoning window; arm_protocol now says otherwise")
     cfg = news.load_config()
     index, _ = news.build(cfg)
-    windows = {"post": panel.decision_dates(*POST), "pre": panel.decision_dates(*PRE)}
+    windows = {k: panel.decision_dates(*v) for k, v in CONDITIONS.items()}
     prompts = {k: a0_prompts(d, index, cfg, names, ntok, playbook) for k, d in windows.items()}
 
     ds_growth = growth[(growth["backbone"] == "deepseek-v4-flash") & growth["tokens_per_curator_call"].notna()]
@@ -290,20 +287,18 @@ def main():
     cc = roles_ds["curator"]["response_tokens"]
     gen = trial["completion_tokens"]
     spt = trial["s_per_completion_token"]
+    a1_tok = win["per_decision_with_reasoning"]["median"]      # the decided format, in every scenario
 
     T = {**tmpl, "a1_header": win["header"], "ground_truth": win["ground_truth_block"]["median"]}
     scenarios = {
-        "low": {"gen_completion": gen["min"], "s_per_tok": spt["mean"],
-                "a1_per_decision": win["per_decision_compact"]["median"], "a1_instruction": 300, "a1_reflection": 500,
+        "low": {"gen_completion": gen["min"], "s_per_tok": spt["mean"], "a1_per_decision": a1_tok,
                 "growth": float(g_all.min()), "reflector_completion": rc["median"], "curator_completion": cc["median"],
                 "bullets_used_share": 0.0, "final_answer": trial["final_answer_tokens"]["median"], "retry_factor": 1.00},
-        "mid": {"gen_completion": gen["mean"], "s_per_tok": spt["mean"],
-                "a1_per_decision": win["per_decision_compact"]["median"], "a1_instruction": 300, "a1_reflection": 1000,
+        "mid": {"gen_completion": gen["mean"], "s_per_tok": spt["mean"], "a1_per_decision": a1_tok,
                 "growth": float(ds_growth["tokens_per_curator_call"].median()),
                 "reflector_completion": rc["median"] * ratio["ratio"], "curator_completion": cc["median"] * ratio["ratio"],
                 "bullets_used_share": 0.25, "final_answer": trial["final_answer_tokens"]["median"], "retry_factor": 1.02},
-        "high": {"gen_completion": gen["max"], "s_per_tok": spt["mean"],
-                 "a1_per_decision": win["per_decision_with_reasoning"]["median"], "a1_instruction": 300, "a1_reflection": 2000,
+        "high": {"gen_completion": gen["max"], "s_per_tok": spt["mean"], "a1_per_decision": a1_tok,
                  "growth": float(g_all.max()),
                  "reflector_completion": rc["p90"] * ratio["ratio"], "curator_completion": cc["p90"] * ratio["ratio"],
                  "bullets_used_share": 0.5, "final_answer": trial["final_answer_tokens"]["median"], "retry_factor": 1.10},
@@ -321,27 +316,28 @@ def main():
         limit = HIGH_LIMIT if sc == "high" else ""
         for cond in prompts:
             r = results[(sc, cond)]
-            for arm in ("A0", "A1_one_call", "A1_two_calls", "A2"):
+            for arm in ("A0", "A1", "A2"):
                 table.append({"scenario": sc, "condition": cond, **fmt_row(arm, r[arm], SEEDS),
                               "limit": limit, "depends_on": TABLE_DEPENDS_ON})
-            for a1 in ("A1_one_call", "A1_two_calls"):
-                total = r["A0"] + r[a1] + r["A2"]
-                table.append({"scenario": sc, "condition": cond, **fmt_row(f"total(A0+{a1}+A2)", total, SEEDS),
-                              "limit": limit, "depends_on": TABLE_DEPENDS_ON})
+            table.append({"scenario": sc, "condition": cond, **fmt_row("total(A0+A1+A2)", r["A0"] + r["A1"] + r["A2"], SEEDS),
+                          "limit": limit, "depends_on": TABLE_DEPENDS_ON})
+        both = sum(results[(sc, c)]["A0"] + results[(sc, c)]["A1"] + results[(sc, c)]["A2"] for c in prompts)
+        table.append({"scenario": sc, "condition": "post+pre", **fmt_row("total(A0+A1+A2)", both, SEEDS),
+                      "limit": limit, "depends_on": TABLE_DEPENDS_ON})
     tbl = pd.DataFrame(table)
 
-    # sensitivity: move one assumption from mid to high, total over both conditions, A1 one call
+    # sensitivity: move one assumption from mid to high, total over both conditions
     def total_hours_cost(S):
         h = c = 0.0
         for p in prompts.values():
             r, _ = arm_runs(p, S, T)
-            v = (r["A0"] + r["A1_one_call"] + r["A2"]) * SEEDS
+            v = (r["A0"] + r["A1"] + r["A2"]) * SEEDS
             h += v[2] / 3600
             c += v[3]
         return h, c
     base_h, base_c = total_hours_cost(scenarios["mid"])
     sens = []
-    for key in ("gen_completion", "a1_per_decision", "growth", "reflector_completion", "curator_completion",
+    for key in ("gen_completion", "growth", "reflector_completion", "curator_completion",
                 "bullets_used_share", "retry_factor"):
         S = dict(scenarios["mid"])
         S[key] = scenarios["high"][key]
@@ -352,7 +348,7 @@ def main():
 
     tail = {"per_call_latency_s": trial["latency_s"],
             "hours_if_every_call_at_p90_s_per_token": {
-                sc: round(sum((results[(sc, c)]["A0"] + results[(sc, c)]["A1_one_call"] + results[(sc, c)]["A2"])[1]
+                sc: round(sum((results[(sc, c)]["A0"] + results[(sc, c)]["A1"] + results[(sc, c)]["A2"])[1]
                               for c in prompts) * SEEDS * trial["s_per_completion_token"]["p90"] / 3600, 1)
                 for sc in scenarios},
             "limit": "trial n=5; p90 of 5 points is an interpolation and NOT a tail estimate; "
@@ -369,6 +365,11 @@ def main():
         "CAVEATS": CAVEATS,
         "created_at": _dt.datetime.now().isoformat(timespec="seconds"),
         "git": records.git_state(),
+        "conditions": CONDITIONS,
+        "data_last_dates": panel.data_last_dates(),
+        "a1_protocol": {"window_format": A1_WINDOW_FORMAT, "calls_per_decision": A1_CALLS_PER_DECISION,
+                        "window_k": WINDOW_K, "per_decision_tokens_used": a1_tok,
+                        "window5_tokens_measured": win["window5_with_reasoning"]},
         "decision_dates": {k: {"count": int(len(d)), "first": str(d[0].date()), "last": str(d[-1].date())} for k, d in windows.items()},
         "a0_prompt_tokens": {k: dist(p["prompt"]) for k, p in prompts.items()},
         "context_tokens": {k: dist(p["context"]) for k, p in prompts.items()},
@@ -380,7 +381,7 @@ def main():
         "playbook_growth": growth.to_dict(orient="records"),
         "scenarios": {**scenarios, "high_limit": HIGH_LIMIT},
         "a2_playbook_tokens": {f"{sc}/{cond}": v for (sc, cond), v in playbooks.items()},
-        "sensitivity_total_both_conditions_A1_one_call": sens,
+        "sensitivity_total_both_conditions": sens,
         "baseline_mid_total": {"hours": round(base_h, 1), "cost_usd_reference": round(base_c, 2),
                                "depends_on": TABLE_DEPENDS_ON},
         "tail": tail,
@@ -396,7 +397,7 @@ def main():
     banner = "\n".join(f"!! {k}: {v}" for k, v in CAVEATS.items())
     print("== CAVEATS\n" + banner)
     pd.set_option("display.width", 250)
-    for k in ("decision_dates", "a0_prompt_tokens", "context_tokens", "trial", "reasoning_mode_content_ratio",
+    for k in ("conditions", "data_last_dates", "a1_protocol", "decision_dates", "a0_prompt_tokens", "context_tokens", "trial", "reasoning_mode_content_ratio",
               "templates", "a1_window", "ace_role_sizes_deepseek_runs", "scenarios", "a2_playbook_tokens",
               "baseline_mid_total", "tail", "v8_formula_recomputed_hours"):
         print(f"\n== {k}\n{json.dumps(out[k], ensure_ascii=False, default=str, indent=1)}")

@@ -1,4 +1,4 @@
-"""The real Generator / Reflector / Curator behind the replay (v9.2 §5.2.0, §4.4, §10.1). M5a, part 2.
+"""The real Generator / Reflector / Curator behind the replay (v9.3 §5.2.0, §4.4, §10.1). M5a, part 2.
 
 Nothing here calls an LLM on import or construction; calls happen only when replay.run_replay
 invokes the callables, through the client passed in. ace/ is not modified: the ACE role classes
@@ -9,9 +9,11 @@ Generator, every arm (GENERATOR_PROMPT through ace.core.generator.Generator)
   context     the decision date's news and numbers, format_trial.render_context
   reflection  "(empty)" for every arm: refinement is off (MAX_NUM_ROUNDS = 1), nothing is regenerated
   playbook    A0 and A1: the ACE empty playbook. A2: its own playbook text.
-  A1 alone also gets its rolling window, appended to the context slot in the format the user
-  chooses from A1_WINDOW_FORMATS. The format is not decided (v9.2 §5.2.1), so A1_WINDOW_FORMAT is
-  None and LiveRoles refuses to run without an explicit choice.
+  A1 alone also gets its rolling window, appended to the context slot, in the format decided on
+  2026-09-15: arm_protocol.A1_WINDOW_FORMAT = "with_reasoning" (each matured decision with its
+  scores, realized alpha and the reasoning of the time; reason in arm_protocol's docstring).
+  LiveRoles refuses any other format; the compact renderer remains only to reproduce the budget's
+  775-token measurement.
 
 Reflector, A2 only, once per non-void maturity (REFLECTOR_PROMPT through Reflector.reflect)
   question = QUESTION; reasoning_trace = the decision's full generation; predicted_answer =
@@ -26,7 +28,7 @@ Curator, only after a usable Reflector (CURATOR_PROMPT through Curator.curate)
   A response counts as usable only when Curator's own schema check accepts it (curator_check).
   AcePlaybook.commit re-applies the accepted operations with playbook_utils.apply_curator_operations
   and requires the result to equal what Curator returned, then BulletpointAnalyzer.analyze runs with
-  merge=False (v9.2 §5.2: analyzer on, bulletpoint_merge off; dedup keeps the first bullet, no LLM).
+  merge=False (v9.3 §5.2: analyzer on, bulletpoint_merge off; dedup keeps the first bullet, no LLM).
 
 Client: one retry layer only (arm_protocol). make_client() requires ACE_MAX_RETRIES=1 and builds the
 ClinePass client with max_retries=0; ReasoningOffClient sends reasoning={"enabled": false} on every
@@ -68,15 +70,15 @@ READ_TIMEOUT_S = 1800
 REASONING = {"enabled": False}
 USE_JSON_MODE = True
 PLAYBOOK_TOKEN_BUDGET = 80000        # ACE's default playbook_token_budget (ace/ace.py)
-USE_BULLETPOINT_ANALYZER = True      # v9.2 §5.2
+USE_BULLETPOINT_ANALYZER = True      # v9.3 §5.2
 BULLETPOINT_THRESHOLD = 0.90         # ACE's default
-BULLETPOINT_MERGE = False            # v9.2 §5.2: must stay off
+BULLETPOINT_MERGE = False            # v9.3 §5.2: must stay off
 EMPTY_PLAYBOOK = ACE._initialize_empty_playbook(None)
 
-A1_WINDOW_FORMAT = None              # NOT decided; the user picks one of A1_WINDOW_FORMATS
-A1_WINDOW_FORMATS = ("compact", "with_reasoning")
+A1_WINDOW_FORMAT = ap.A1_WINDOW_FORMAT   # "with_reasoning", decided 2026-09-15 (arm_protocol)
+A1_WINDOW_FORMATS = ("compact", "with_reasoning")   # renderers; compact only reproduces the budget's 775
 A1_WINDOW_HEADER = "最近 5 個已到期的決策與其實際報酬：\n"
-A1_SLOT = "context"                  # where the window goes; part of the undecided format
+A1_SLOT = "context"                  # where the window goes, as built and verified offline
 
 PROVIDER_FIELDS = ("generation_id", "http_status", "echoed_model", "finish_reason", "resolvedProvider",
                    "finalProvider", "modelAttemptCount", "totalProviderAttemptCount", "usage")
@@ -155,7 +157,7 @@ class Contexts:
         return self._cache[day]
 
 
-# ---------------------------------------------------------------- A1 window (format not decided)
+# ---------------------------------------------------------------- A1 window (format decided: with_reasoning)
 
 def a1_decision_block(slot, names, fmt):
     """One matured decision as the budget estimate rendered it (budget_estimate.a1_window)."""
@@ -227,7 +229,7 @@ class AcePlaybook:
 
     def __init__(self, analyzer=None, threshold=BULLETPOINT_THRESHOLD):
         if BULLETPOINT_MERGE:
-            raise ValueError("bulletpoint_merge must be off (v9.2 §5.2)")
+            raise ValueError("bulletpoint_merge must be off (v9.3 §5.2)")
         self.text = EMPTY_PLAYBOOK
         self.next_global_id = 1
         self.analyzer = analyzer
@@ -308,8 +310,9 @@ class LiveRoles:
 
     def __init__(self, client, contexts, names, null_sorted, decision_dates, a1_format, log_dir,
                  memory_a2, label):
-        if a1_format not in A1_WINDOW_FORMATS:
-            raise ValueError(f"A1 window format not chosen (got {a1_format!r}); v9.2 leaves it to the user")
+        if a1_format != A1_WINDOW_FORMAT:
+            raise ValueError(f"A1 window format is decided as {A1_WINDOW_FORMAT!r} (arm_protocol, 2026-09-15); "
+                             f"got {a1_format!r}")
         self.contexts, self.names, self.null = contexts, names, null_sorted
         self.decision_dates = pd.DatetimeIndex(decision_dates)
         self.n_learning = len(self.decision_dates) - DELAY

@@ -1,6 +1,6 @@
 """Offline validation of driver part 2, and prompt tokens per arm. No LLM call, no network.
 
-    .venv/bin/python -m eval.twstock.replay_offline [--conditions post,pre] [--formats compact,with_reasoning]
+    .venv/bin/python -m eval.twstock.replay_offline [--conditions post,pre] [--formats with_reasoning]
 
 Production code runs unchanged: replay.run_replay, roles.LiveRoles / AcePlaybook, the ACE Generator,
 Reflector, Curator and BulletpointAnalyzer with their templates, llm.timed_llm_call, the OpenAI SDK,
@@ -88,6 +88,11 @@ P5 provider_metadata reaches disk:
  c every request body: model cline-pass/deepseek-v4-flash, reasoning {"enabled": false},
    response_format json_object, temperature 0, max_tokens 65536;
  d every answered call has one ACE llm_logs file whose provider.generation_id matches.
+ e (schema 4, added 2026-09-15 with these criteria fixed before its first run) llm_calls.parquet per arm:
+   rows == requests the wire received for that arm == manifest llm_calls; an answered row's cost_usd ==
+   its provider-log usage.cost exactly, an unanswered row has none; per date, generator rows sum to meta
+   cost_usd and reflector + curator rows to meta aux_cost_usd (both null when no row has a cost), within
+   1e-12; all rows of the label sum to the provider log's usage.cost within 1e-9.
 P6 Structure:
  a Generator requests per (arm, date) == recorded attempts, only on decision dates;
  b no regeneration: no Generator request for an A2 decision after its first Reflector request;
@@ -95,7 +100,8 @@ P6 Structure:
  d records.write_run / read_run succeed for the three arms, one meta row per date; playbook_bullets rows
    == bullets added;
  e the analyzer ran once per successful Curator commit, always merge=False, with no request during it.
-P7 Guards: LiveRoles refuses a1_format None and "other"; ReasoningOffClient refuses max_retries != 0.
+P7 Guards: LiveRoles refuses a1_format None, "other" and "compact" (decided 2026-09-15: with_reasoning);
+   ReasoningOffClient refuses max_retries != 0.
 P8 a The A1 candidates are the ones the budget measured: the five trial decisions rendered by
      roles.a1_decision_block give per-decision tokens and 5-decision window totals equal to a1_window in
      results/budget/budget_20260914_120638.json.
@@ -747,6 +753,37 @@ def verify(env, run):
         answered = sum(1 for e in reqs if e.get("status") == 200)
         return not bad and n == answered, (bad[:5], n, answered)
     check(label, "P5b provider fields and cost in attempts_json / aux_attempts_json read back from disk", p5b)
+
+    def p5e():
+        by_gen = {x["generation_id"]: x for x in plog if x.get("generation_id")}
+        bad, n_rows, total_rows = [], 0, 0.0
+        for arm in rp.ARMS:
+            calls = pd.read_parquet(run["written"][arm] / "llm_calls.parquet")
+            _, m, man = records.read_run(run["written"][arm])
+            n_rows += len(calls)
+            want = sum(1 for e in reqs if e["arm"] == arm)
+            if len(calls) != want or man.get("llm_calls") != want:
+                bad.append((arm, "rows", len(calls), want, man.get("llm_calls")))
+            for r in calls.itertuples(index=False):
+                x = by_gen.get(r.generation_id) if pd.notna(r.generation_id) else None
+                if bool(r.ok_call):
+                    if x is None or x["usage"]["cost"] != r.cost_usd:
+                        bad.append((arm, r.call_id, "cost"))
+                elif pd.notna(r.cost_usd):
+                    bad.append((arm, r.call_id, "cost on a call with no answer"))
+            total_rows += float(calls["cost_usd"].sum())
+            md = m.set_index("decision_date")
+            for col, rs in (("cost_usd", ("generator",)), ("aux_cost_usd", ("reflector", "curator"))):
+                sums = calls[calls["role"].isin(rs)].groupby("decision_date")["cost_usd"].sum(min_count=1)
+                for d, v in md[col].items():
+                    s = sums.get(d, np.nan)
+                    if pd.isna(v) != pd.isna(s) or (pd.notna(v) and abs(float(v) - float(s)) > 1e-12):
+                        bad.append((arm, col, str(d.date()), v, s))
+        total_log = sum(((x.get("usage") or {}).get("cost") or 0.0) for x in plog)
+        if abs(total_log - total_rows) > 1e-9:
+            bad.append(("total", total_log, total_rows))
+        return not bad and n_rows == len(reqs), (bad[:5], n_rows, len(reqs))
+    check(label, "P5e llm_calls.parquet: one row per request, cost == provider log, per-date sums == meta", p5e)
     check(label, "P5c request bodies: model, reasoning off, JSON mode, temperature 0, max_tokens 65536", lambda: (
         all(e["body"].get("model") == roles.MODEL and e["body"].get("reasoning") == {"enabled": False}
             and e["body"].get("response_format") == {"type": "json_object"} and e["body"].get("temperature") == 0.0
@@ -916,7 +953,7 @@ def a1_candidates(env, out):
     sample_dir = out / "a1_samples"
     sample_dir.mkdir(parents=True, exist_ok=True)
     info = {}
-    for fmt in roles.A1_WINDOW_FORMATS:
+    for fmt in (roles.A1_WINDOW_FORMAT,):
         label = f"sample_{fmt}"
         live = roles.LiveRoles(env.client, env.contexts, env.names, env.null, dates, fmt, sample_dir / "llm_logs",
                                roles.AcePlaybook(), label)
@@ -943,7 +980,7 @@ def a1_candidates(env, out):
 def main():
     ap_ = argparse.ArgumentParser()
     ap_.add_argument("--conditions", default="post,pre")
-    ap_.add_argument("--formats", default="compact,with_reasoning")
+    ap_.add_argument("--formats", default=roles.A1_WINDOW_FORMAT)
     args = ap_.parse_args()
     args.conditions = args.conditions.split(",")
     args.formats = args.formats.split(",")
@@ -977,7 +1014,7 @@ def main():
 
     def p7():
         refused = []
-        for bad in (None, "other"):
+        for bad in (None, "other", "compact"):
             try:
                 roles.LiveRoles(env.client, env.contexts, env.names, env.null, env.cond[args.conditions[0]]["dates"],
                                 bad, out / "guard", roles.AcePlaybook(), "guard")
