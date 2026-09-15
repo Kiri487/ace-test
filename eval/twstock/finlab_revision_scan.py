@@ -82,10 +82,13 @@ def load(path):
     except (ValueError, TypeError):
         df.index = df.index.astype(str)
     df = df[~df.index.duplicated(keep="last")].sort_index()
-    # some files label columns "1101 台泥" (code and name); compare on the code
+    # some files label columns "1101 台泥" (code and name); a renamed company then has two columns for one
+    # code, so merge them on the code (first non-null value per date) instead of keeping either one
+    df = df.apply(pd.to_numeric, errors="coerce")
     df.columns = [str(c).split(" ")[0] for c in df.columns]
-    df = df.loc[:, ~df.columns.duplicated(keep="last")]
-    return df.apply(pd.to_numeric, errors="coerce")
+    if df.columns.duplicated().any():
+        df = df.T.groupby(level=0, sort=False).first().T
+    return df
 
 
 def ratio(df):
