@@ -213,14 +213,22 @@ def evaluate(post_dir, long_dir, nonews_dir, repeat_dir, purpose="pilot_gate"):
     index, _ = news.build(cfg)
     adj_close = panel.frame("adj_close")
     verdict = {"gate_sha256": gate_sha256(), "windows": {}}
-    S_post, dec_post, meta_post, _ = _scores(post_dir, purpose)
-    S_nn, _, _, _ = _scores(nonews_dir, purpose)
-    S_rep, _, _, _ = _scores(repeat_dir, purpose)
-    c1 = news_dependence(S_post.reindex(S_nn.index), S_nn, S_rep.reindex(S_nn.index))
-    c1["fail"] = bool(c1["median_rho_nonews"] >= L1["C1"]["fail_if_median_rho_nonews_at_least"]
-                      or c1["gap"] < L1["C1"]["fail_if_gap_below"])
+    if post_dir is not None and nonews_dir is not None and repeat_dir is not None:
+        S_post, _, _, _ = _scores(post_dir, purpose)
+        S_nn, _, _, _ = _scores(nonews_dir, purpose)
+        S_rep, _, _, _ = _scores(repeat_dir, purpose)
+        c1 = news_dependence(S_post.reindex(S_nn.index), S_nn, S_rep.reindex(S_nn.index))
+        c1["unjudgeable"] = bool(not c1["median_rho_repeat"] >= L1["C1"]["unjudgeable_if_rho_repeat_below"])
+        c1["fail"] = bool(not c1["unjudgeable"]
+                          and (c1["median_rho_nonews"] >= L1["C1"]["fail_if_median_rho_nonews_at_least"]
+                               or c1["gap"] < L1["C1"]["fail_if_gap_below"]))
+    else:
+        c1 = {"missing": "news_ablation or post_85 not complete", "unjudgeable": True, "fail": False}
     verdict["C1_news_dependence_post"] = c1
     for wname, d in (("post_85", post_dir), ("long_2025_05", long_dir)):
+        if d is None:
+            verdict["windows"][wname] = {"missing": "run not complete", "verdict": "未完成"}
+            continue
         S, dec, meta, man = _scores(d, purpose)
         dates = S.index
         U = {t: list(dec.loc[dec["decision_date"] == t, "stock_id"]) for t in dates}
@@ -242,10 +250,27 @@ def evaluate(post_dir, long_dir, nonews_dir, repeat_dir, purpose="pilot_gate"):
         l2["voided_dates"] = void
         l2["invalid"] = bool(void > w["invalid_if_voided_over"] or l2["n_computable"] < w["invalid_if_computable_below"])
         l2["pass"] = None if l2["invalid"] else bool(l2["mean_csic"] > L2["pass_if_mean_csic_above"])
+        extra_h = {}
+        for h in (5, 10, 20, 40):
+            if f"alpha_h{h}" in dec:
+                A = ic.to_matrix(dec, f"alpha_h{h}", S.index)
+                cs, _ = ic.cs_ic(S, A)
+                ts, _ = ic.ts_ic(S, A)
+                extra_h[h] = {"mean_csic": float(cs.mean()), "sd_daily_csic": float(cs.std()),
+                              "mean_tsic": float(ts.mean()), "n_csic_dates": int(cs.notna().sum())}
+        l1_fail = bool(c2["fail"] or c3["fail"] or c4["fail"] or c5["fail"] or (wname == "post_85" and c1["fail"]))
+        l1_unjudgeable = bool(not c2["evaluable"] or (wname == "post_85" and c1["unjudgeable"]))
+        if l1_fail:
+            w_verdict = "不通過"
+        elif l1_unjudgeable or l2["invalid"]:
+            w_verdict = "不可判"
+        else:
+            w_verdict = "通過" if l2["pass"] else "不通過"
         verdict["windows"][wname] = {"C2_zero_news": c2, "C3_dispersion": c3, "C4_persistence": c4, "C5_momentum": c5,
-                                     "layer1_fail": bool(c2["fail"] or c3["fail"] or c4["fail"] or c5["fail"]
-                                                         or (wname == "post_85" and c1["fail"])),
-                                     "layer2_csic_h10": l2}
+                                     "layer1_fail": l1_fail, "layer1_unjudgeable": l1_unjudgeable,
+                                     "layer2_csic_h10": l2, "by_horizon_reported_only": extra_h,
+                                     "tsic_note": "LLM-score placebo baseline undefined; not comparable with 0 or -0.189",
+                                     "verdict": w_verdict}
     return verdict
 
 

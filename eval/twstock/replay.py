@@ -92,6 +92,7 @@ def manifest_fields(run_kind, seed=ARM_ORDER_SEED, pilot_window=None):
            "arm_order_uniformity": {label: arm_order_uniformity(seed, n)
                                     for label, n in (("post_85", 85), ("pre_75", 75))},
            "conditions": CONDITIONS,
+           "sampling": ap.SAMPLING,
            "a1_window": {"k": WINDOW_K, "format": ap.A1_WINDOW_FORMAT, "format_reason": ap.A1_WINDOW_FORMAT_REASON,
                          "calls_per_decision": ap.A1_CALLS_PER_DECISION, "calls_reason": ap.A1_CALLS_REASON,
                          "decided": "2026-09-15 (user; calls corrected from 1 to 2 the same day)",

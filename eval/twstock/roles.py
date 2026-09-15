@@ -72,6 +72,8 @@ MAX_TOKENS = 65536
 READ_TIMEOUT_S = 1800
 REASONING = {"enabled": False}
 USE_JSON_MODE = True
+if (ap.SAMPLING["sent"]["model"], ap.SAMPLING["sent"]["max_tokens"], ap.SAMPLING["sent"]["reasoning"]) != (MODEL, MAX_TOKENS, REASONING):
+    raise RuntimeError("arm_protocol.SAMPLING no longer describes what roles sends")
 PLAYBOOK_TOKEN_BUDGET = 80000        # ACE's default playbook_token_budget (ace/ace.py)
 USE_BULLETPOINT_ANALYZER = True      # v9.3 §5.2
 BULLETPOINT_THRESHOLD = 0.90         # ACE's default

@@ -148,6 +148,20 @@ REFLECTION_FAILURE_DISCLOSURE_BASIS = (
     "set by the user 2026-09-15 before any A1/A2 call: an A1 date whose reflection fails is in effect A0 that day, "
     "so a failure rate that is not low pulls A1 toward A0 and biases RQ2; above 5% of an arm's reflection attempts "
     "(A1 reflection dates, A2 processed maturities) the thesis gets a section on it; not to be changed after running")
+SAMPLING = {   # recorded 2026-09-15 (user): what every request already carries; no behaviour was changed
+    "sent": {"model": "cline-pass/deepseek-v4-flash", "temperature": 0.0, "max_tokens": 65536,
+             "response_format": {"type": "json_object"}, "reasoning": {"enabled": False}},
+    "not_sent_api_default": {"top_p": 1, "stop": None},
+    "not_in_api": ["n", "seed"],
+    "no_longer_supported_by_api": ["frequency_penalty", "presence_penalty"],
+    "default_source": ("DeepSeek chat-completion API reference, api-docs.deepseek.com/api/create-chat-completion, fetched "
+                       "2026-09-15: temperature default 1, top_p default 1, frequency_penalty and presence_penalty no longer "
+                       "supported, response_format default text, max_tokens default 8K in non-thinking mode; n and seed absent"),
+    "caveat": ("ClinePass forwards through a gateway to third-party hosts (fireworks, deepinfra seen so far); a host's own "
+               "default for an unsent parameter cannot be observed from the response"),
+    "where": ("llm.timed_llm_call sets temperature 0.0, max_tokens and response_format; roles.ReasoningOffClient adds "
+              "reasoning; non-streaming SDK call; checked on every offline request body by replay_offline P5c"),
+}
 RUN_KINDS = ("offline_check", "pilot", "main")
 PILOT_RUN_WINDOWS = ("post_85", "long_2025_05", "news_ablation")   # dates: replay.PILOT_WINDOWS
 PILOT_NEWS_ABLATION_EVERY = 5           # news_ablation: post_85 dates whose index % 5 == 0 (17 dates)
