@@ -188,7 +188,7 @@ def a1_window_block(slots, names, fmt):
 
 # A1 step 1 (arm_protocol docstring). Written 2026-09-15 before any A1 call. It carries the task text so
 # the decisions can be read, and no instruction the Generator does not also get: no verdict words, no
-# hint about what to conclude. The length is an instruction (A1_REFLECTION_CAP_BASIS), not max_tokens.
+# hint about what to conclude. No length instruction: ACE's REFLECTOR_PROMPT has none (revised 2026-09-15).
 A1_REFLECTION_PROMPT = """你要為下一個決策日的評分寫一段反思。以下是同一任務最近已經到期的 {n} 個決策（最多 5 個；作廢的決策不列出），依決策日由舊到新排列。每個決策列出當時股票池每檔股票的評分、到期後實現的 10 日市場調整報酬（實際α，相對股票池 50 檔等權平均），以及當時寫下的推理。
 
 當時的任務說明：
@@ -200,14 +200,12 @@ A1_REFLECTION_PROMPT = """你要為下一個決策日的評分寫一段反思。
 請檢視這些決策：評分與實現的 α 在哪些地方相符、哪些地方不相符，當時推理中的哪些判斷可能是原因，以及哪些觀察值得帶到下一個決策日。
 
 輸出規定：
-- 回傳一個 JSON 物件，只含一個鍵 "reflection"，值是反思文字（字串）
-- 反思文字不超過約 {words} 個英文單字；若以中文撰寫，不超過約 {zh_chars} 字"""
+- 回傳一個 JSON 物件，只含一個鍵 "reflection"，值是反思文字（字串）"""
 
 
 def a1_reflection_prompt(slots, names, fmt):
     window = "\n\n".join(a1_decision_block(s, names, fmt) for s in slots)
-    return A1_REFLECTION_PROMPT.format(n=len(slots), question=QUESTION, window=window,
-                                       words=ap.A1_REFLECTION_CAP_WORDS, zh_chars=ap.A1_REFLECTION_CAP_ZH_CHARS)
+    return A1_REFLECTION_PROMPT.format(n=len(slots), question=QUESTION, window=window)
 
 
 # ---------------------------------------------------------------- A2 playbook

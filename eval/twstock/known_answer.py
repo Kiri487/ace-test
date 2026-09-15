@@ -41,7 +41,7 @@ RESULTS = []
 
 def evaluate_recorded(run_dir, dates, periods, n_boot=N_BOOT):
     """IC for a run as read back from disk, so the record round trip is tested too."""
-    dec, _, _ = records.read_run(run_dir)
+    dec, _, _ = records.read_run(run_dir, "offline_check")
     S = ic.to_matrix(dec, "score", dates)
     out = {}
     for h in HORIZONS:
@@ -159,7 +159,7 @@ def run_factors(root, pnl, dates, U, periods, window):
                                     extra={"purpose": PURPOSE})
         full = evaluate_recorded(run_dir, dates, periods)
         win = evaluate_recorded(run_dir, window, {"test_window": window})
-        dec, _, _ = records.read_run(run_dir)
+        dec, _, _ = records.read_run(run_dir, "offline_check")
         S = ic.to_matrix(dec, "score", dates)
         by_year = {}
         for h in HORIZONS:
@@ -201,7 +201,7 @@ def run_factors(root, pnl, dates, U, periods, window):
 
 
 def print_schema(run_dir):
-    dec, meta, manifest = records.read_run(run_dir)
+    dec, meta, manifest = records.read_run(run_dir, "offline_check")
     print(f"\n== record schema, as read back from {run_dir.name} ==")
     print(f"  decisions.parquet: {len(dec)} rows")
     for c, t in dec.dtypes.items():

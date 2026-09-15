@@ -24,6 +24,12 @@ Schema 5 (2026-09-15): A1 is two calls - the reflection call's status, attempts,
 flag per date (its attempts in aux_attempts_json, role a1_reflector) - and every LLM run's manifest
 carries run_kind (offline_check | pilot | main) and usable_as_result. require_result_run() is the
 gate any result table must pass: a pilot or offline run is refused.
+
+Schema 6 (2026-09-15, second ruling): the reflection overrun flag is gone (A1's reflection length is
+measured, not capped); manifests carry reflection failure rates against the 5% disclosure rate; a pilot
+names its pilot_window and a main run must cover exactly one replay.CONDITIONS window; read_run takes a
+purpose - "result" opens only a main run, "pilot_gate" only a pilot, "offline_check" only offline or
+non-LLM runs (arm_protocol.PILOT_LOCK).
 """
 
 import datetime as _dt
@@ -35,10 +41,13 @@ import numpy as np
 import pandas as pd
 
 from . import data_snapshot, ic
-from .arm_protocol import RUN_KINDS, attempt_cost
+from .arm_protocol import PILOT_RUN_WINDOWS, REFLECTION_FAILURE_DISCLOSURE_RATE, RUN_KINDS, attempt_cost
 from .panel import HORIZONS, UNIVERSE_SIZE
+from .panel import decision_dates as calendar_decision_dates
+from .replay import CONDITIONS
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
+READ_PURPOSES = ("result", "pilot_gate", "offline_check")
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COST_SOURCE = ("usage.cost of each answered call as the gateway metered it (ClinePass quota metering at the "
                "reference price, not cash); a call that got no answer carries none - its HTTP status is in the "
@@ -78,8 +87,7 @@ LLM_FIELDS = {
     "a1_reflection_status": "string",     # ok | failed | not_run (no usable slot in the window)
     "a1_reflection_attempts": "Int64",
     "a1_reflection_retries": "Int64",
-    "a1_reflection_tokens": "Int64",      # completion tokens of the usable reflection
-    "a1_reflection_over_cap": "boolean",  # above arm_protocol.A1_REFLECTION_CAP_TOKENS; flagged, not cut
+    "a1_reflection_tokens": "Int64",      # completion tokens of the usable reflection (measured, never capped)
 }
 
 # <run_dir>/llm_calls.parquet: one row per request attempt, unpacked from attempts_json and
@@ -236,9 +244,16 @@ def _check_a1_reflection(meta):
 
 def require_result_run(manifest):
     """Gate for anything that builds a result table: only run_kind "main" may enter one."""
-    if manifest.get("run_kind") != "main" or manifest.get("usable_as_result") is not True:
+    if manifest.get("run_kind") != "main" or manifest.get("usable_as_result") is not True or "pilot_window" in manifest:
         raise ValueError(f"run_kind {manifest.get('run_kind')!r} is not a result run (pilot and offline runs never are)")
     return manifest
+
+
+def _wide_rate(failed, attempted):
+    rate = failed / attempted if attempted else None
+    return {"failed": int(failed), "attempted": int(attempted), "failure_rate": rate,
+            "over_disclosure_rate": None if rate is None else bool(rate > REFLECTION_FAILURE_DISCLOSURE_RATE),
+            "disclosure_rate": REFLECTION_FAILURE_DISCLOSURE_RATE}
 
 
 def _fill_llm_meta(meta, llm_meta):
@@ -282,8 +297,16 @@ def write_run(run_dir, panel, scores, arm, extra=None, horizons=HORIZONS, llm_me
     None for the known-answer factors, whose LLM fields stay null.
     """
     run_dir = Path(run_dir)
-    if llm_meta is not None and (extra or {}).get("run_kind") not in RUN_KINDS:
-        raise ValueError(f"an LLM run's manifest needs run_kind in {RUN_KINDS}, got {(extra or {}).get('run_kind')!r}")
+    extra = dict(extra or {})
+    kind = extra.get("run_kind")
+    if llm_meta is not None and kind not in RUN_KINDS:
+        raise ValueError(f"an LLM run's manifest needs run_kind in {RUN_KINDS}, got {kind!r}")
+    if (kind == "pilot") != ("pilot_window" in extra) or extra.get("pilot_window", PILOT_RUN_WINDOWS[0]) not in PILOT_RUN_WINDOWS:
+        raise ValueError(f"a pilot run names its pilot_window in {PILOT_RUN_WINDOWS}, and no other run may (PILOT_LOCK)")
+    if kind == "main":
+        got = set(pd.DatetimeIndex(panel["decision_date"].unique()))
+        if not any(got == set(calendar_decision_dates(*w)) for w in CONDITIONS.values()):
+            raise ValueError("a main run must cover exactly one replay.CONDITIONS window (PILOT_LOCK)")
     run_dir.mkdir(parents=True, exist_ok=True)
     keys = ["decision_date", "stock_id"]
 
@@ -355,12 +378,14 @@ def write_run(run_dir, panel, scores, arm, extra=None, horizons=HORIZONS, llm_me
         if meta["a1_reflection_status"].notna().any():
             st = meta["a1_reflection_status"]
             manifest["a1_reflections"] = {k: int((st == k).sum()) for k in ("ok", "failed", "not_run")}
-            manifest["a1_reflections"]["over_cap"] = int(meta["a1_reflection_over_cap"].fillna(False).astype(bool).sum())
+            manifest["a1_reflections"].update(_wide_rate((st == "failed").sum(), st.isin(["ok", "failed"]).sum()))
         if meta["voided"].notna().any():
             manifest["voided_decision_points"] = int(meta["voided"].fillna(False).astype(bool).sum())
         if meta["maturity_status"].notna().any():
             manifest["maturities_skipped_void"] = int((meta["maturity_status"] == "skipped_void").sum())
             manifest["reflector_failed"] = int((meta["reflector_status"] == "failed").sum())
+            manifest["reflector_failures"] = _wide_rate((meta["reflector_status"] == "failed").sum(),
+                                                        (meta["maturity_status"] == "processed").sum())
             manifest["curator_failed"] = int((meta["curator_status"] == "failed").sum())
         if meta["window_skipped_void"].notna().any():
             manifest["window_slots_skipped_void"] = int(meta["window_skipped_void"].fillna(0).sum())
@@ -368,9 +393,20 @@ def write_run(run_dir, panel, scores, arm, extra=None, horizons=HORIZONS, llm_me
     return run_dir
 
 
-def read_run(run_dir):
+def read_run(run_dir, purpose):
+    """Open a run for one purpose (PILOT_LOCK): "result" only a main run, "pilot_gate" only a pilot,
+    "offline_check" only an offline check or a non-LLM run (no run_kind)."""
+    if purpose not in READ_PURPOSES:
+        raise ValueError(f"purpose must be one of {READ_PURPOSES}, got {purpose!r}")
     run_dir = Path(run_dir)
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    kind = manifest.get("run_kind")
+    if purpose == "result":
+        require_result_run(manifest)
+    elif purpose == "pilot_gate" and kind != "pilot":
+        raise ValueError(f"only a pilot run opens for the gate, got run_kind {kind!r}")
+    elif purpose == "offline_check" and kind not in (None, "offline_check"):
+        raise ValueError(f"a {kind!r} run cannot be opened as an offline check (PILOT_LOCK)")
     decisions = pd.read_parquet(run_dir / "decisions.parquet")
     meta = pd.read_parquet(run_dir / "decision_meta.parquet")
-    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     return decisions, meta, manifest

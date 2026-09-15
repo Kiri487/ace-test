@@ -51,6 +51,10 @@ WINDOW_K = ap.WINDOW_K    # A1 keeps the last 5 maturity slots
 # because the condition is descriptive. A2 learning steps: 64 here vs 74 post-cutoff.
 # (news_selfcheck and news_stats keep all of 2025 on purpose: a leakage check over a superset.)
 CONDITIONS = {"post": ("2026-04-27", "2026-08-26"), "pre": ("2025-01-02", "2025-04-30")}
+# A0 gate pilot only (arm_protocol.PILOT_A0, PILOT_LOCK). Not conditions: a main run may never cover these.
+# news_ablation is a subset of post_85 (every PILOT_NEWS_ABLATION_EVERY-th date).
+PILOT_WINDOWS = {"post_85": CONDITIONS["post"], "long_2025_05": ("2025-05-01", CONDITIONS["post"][1]),
+                 "news_ablation": CONDITIONS["post"]}
 
 # Arm-order seed, chosen 2026-09-14 by a rule fixed before searching: the smallest
 # non-negative integer seed whose arm-order counts give chi-square p > 0.5 on both
@@ -75,10 +79,13 @@ def arm_order_uniformity(seed, n_dates, arms=None):
             "chi2_p": float(chisquare(list(counts.values())).pvalue)}
 
 
-def manifest_fields(run_kind, seed=ARM_ORDER_SEED):
+def manifest_fields(run_kind, seed=ARM_ORDER_SEED, pilot_window=None):
     """Run kind, arm-order and arm-protocol provenance for records.write_run(extra=...)."""
     if run_kind not in ap.RUN_KINDS:
         raise ValueError(f"run_kind must be one of {ap.RUN_KINDS}, got {run_kind!r}")
+    if (run_kind == "pilot") != (pilot_window is not None) or (pilot_window is not None
+                                                               and pilot_window not in ap.PILOT_RUN_WINDOWS):
+        raise ValueError(f"a pilot run needs pilot_window in {ap.PILOT_RUN_WINDOWS} and only a pilot may name one")
     out = {"run_kind": run_kind, "usable_as_result": run_kind == "main",
            "arm_order_seed": seed, "arm_order_seed_rule": ARM_ORDER_SEED_RULE,
            "arm_order_seed_reason": ARM_ORDER_SEED_REASON,
@@ -89,13 +96,18 @@ def manifest_fields(run_kind, seed=ARM_ORDER_SEED):
                          "calls_per_decision": ap.A1_CALLS_PER_DECISION, "calls_reason": ap.A1_CALLS_REASON,
                          "decided": "2026-09-15 (user; calls corrected from 1 to 2 the same day)",
                          "reflection_role": ap.A1_REFLECTION_ROLE,
-                         "reflection_cap": {"tokens": ap.A1_REFLECTION_CAP_TOKENS, "english_words": ap.A1_REFLECTION_CAP_WORDS,
-                                            "chinese_chars": ap.A1_REFLECTION_CAP_ZH_CHARS, "basis": ap.A1_REFLECTION_CAP_BASIS},
+                         "reflection_length": {"instruction": None, "cap": None, "measured": "llm_calls completion_tokens",
+                                               "budget_reference_tokens": ap.A1_REFLECTION_REFERENCE_TOKENS,
+                                               "basis": ap.A1_REFLECTION_REFERENCE_BASIS},
                          "reflection_failure_rule": ap.A1_REFLECTION_FAILURE_RULE,
+                         "reflection_failure_disclosure_rate": ap.REFLECTION_FAILURE_DISCLOSURE_RATE,
+                         "reflection_failure_disclosure_basis": ap.REFLECTION_FAILURE_DISCLOSURE_BASIS,
                          "tokens_reference": "about 2,455 per decision (mean 2,490), 12,466 for a full window of 5; "
                                              "results/budget/budget_20260914_120638.json"}}
     if run_kind == "pilot":
         out["pilot"] = ap.PILOT_A0
+        out["pilot_window"] = pilot_window
+        out["pilot_window_dates"] = PILOT_WINDOWS[pilot_window]
     return out
 
 

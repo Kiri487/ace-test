@@ -27,11 +27,17 @@ Pass criteria, all must hold:
     carries no cost; the manifest counts the calls and totals cost by role
 15. A1 reflection step (schema 5, added 2026-09-15 before its first run): an empty window makes no
     call; a reflection follows rule 5's retries, keeps its text and completion tokens, fails with
-    a1_reflection_missing when "reflection" is absent, and an overrun past the cap is flagged but the
-    text kept; the record stores status per date, the reflection's cost as aux_cost_usd and its
+    a1_reflection_missing when "reflection" is absent, and (revised 2026-09-15, second ruling: no cap)
+    a long reflection is kept whole with no cap field; the record stores status per date, the reflection's cost as aux_cost_usd and its
     attempts as llm_calls rows with role a1_reflector, and refuses a status that disagrees with the
     window; an LLM run without run_kind is refused; a pilot manifest says usable_as_result false and
     require_result_run refuses it
+16. pilot lock and disclosure rate (schema 6, added 2026-09-15 before its first run): learning_summary and
+    the manifest give the A1 reflection failure rate (1 failed of 2 attempted = 0.5, over 0.05) and the A2
+    Reflector rate over processed maturities; read_run opens a pilot only for "pilot_gate", an offline run
+    only for "offline_check", and refuses an unknown purpose; write_run refuses a pilot without a
+    pilot_window, a pilot_window on a non-pilot, an unknown window, and a main run whose dates are not
+    exactly one replay.CONDITIONS window (this last check reads the trading calendar from the snapshot)
 Exit status 1 on the first failure.
 """
 
@@ -158,7 +164,7 @@ def main():
     meta_rows = [ap.meta_row(dates[0], good), ap.meta_row(dates[1], void)]
     with tempfile.TemporaryDirectory() as tmp:
         records.write_run(tmp, pnl, scores, "A0", extra=OFFLINE, llm_meta=meta_rows)
-        dec, meta, man = records.read_run(tmp)
+        dec, meta, man = records.read_run(tmp, "offline_check")
         m = meta.set_index("decision_date")
         check("6 complete date: 50 scored, not void, form recorded",
               m.loc[dates[0], "n_scored"] == 50 and not m.loc[dates[0], "voided"]
@@ -168,8 +174,8 @@ def main():
               and m.loc[dates[1], "void_reason"] == "incomplete"
               and len(json.loads(m.loc[dates[1], "attempts_json"])) == 3
               and dec.loc[dec["decision_date"] == dates[1], "score"].isna().all())
-        check("6 manifest counts voids, schema 5", man["voided_decision_points"] == 1
-              and man["schema_version"] == 5)
+        check("6 manifest counts voids, schema 6", man["voided_decision_points"] == 1
+              and man["schema_version"] == 6)
         summary = ap.void_summary(meta)
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -262,7 +268,7 @@ def main():
     sc = pd.concat([ap.score_rows(d, good) for d in a2_dates], ignore_index=True)
     with tempfile.TemporaryDirectory() as tmp:
         records.write_run(tmp, pnl2, sc, "A2", extra=OFFLINE, llm_meta=rows)
-        _, meta2, man2 = records.read_run(tmp)
+        _, meta2, man2 = records.read_run(tmp, "offline_check")
         ls = ap.learning_summary(meta2).iloc[0]
         check("13 learning_summary counts apart from generation",
               ls["maturities_due"] == 3 and ls["maturities_skipped_void"] == 1 and ls["reflector_ok"] == 1
@@ -283,7 +289,7 @@ def main():
     a1_rows = [ap.meta_row(d, good, window=([a2_dates[0]], [a2_dates[1]])) for d in a2_dates]
     with tempfile.TemporaryDirectory() as tmp:
         records.write_run(tmp, pnl2, sc, "A1", extra=OFFLINE, llm_meta=a1_rows)
-        _, meta3, man3 = records.read_run(tmp)
+        _, meta3, man3 = records.read_run(tmp, "offline_check")
         ls1 = ap.learning_summary(meta3).iloc[0]
         check("13 A1 window skips counted", ls1["window_slots_skipped_void"] == 4
               and man3["window_slots_skipped_void"] == 4)
@@ -305,7 +311,7 @@ def main():
     sc14 = pd.concat([ap.score_rows(dates[0], og), ap.score_rows(dates[1], good)], ignore_index=True)
     with tempfile.TemporaryDirectory() as tmp:
         records.write_run(tmp, pnl, sc14, "A2", extra=OFFLINE, llm_meta=cost_rows)
-        _, meta4, man4 = records.read_run(tmp)
+        _, meta4, man4 = records.read_run(tmp, "offline_check")
         calls = pd.read_parquet(f"{tmp}/llm_calls.parquet")
     m4 = meta4.set_index("decision_date")
     check("14 per-date cost: generation and learning apart; no answer, no cost",
@@ -325,22 +331,23 @@ def main():
     ref_none = ap.process_a1_reflection((), None)
     ref_ok = ap.process_a1_reflection(("slot",), priced([RuntimeError("HTTP 500"), json.dumps({"reflection": "look again"})], 0.004))
     ref_bad = ap.process_a1_reflection(("slot",), priced([json.dumps({"reasoning": "no reflection key"})], 0.001))
-    ref_over = ap.process_a1_reflection(("slot",), lambda n: {"response": json.dumps({"reflection": "long"}),
-                                                              "completion_tokens": ap.A1_REFLECTION_CAP_TOKENS + 1})
+    ref_long = ap.process_a1_reflection(("slot",), lambda n: {"response": json.dumps({"reflection": "x" * 20000}),
+                                                              "completion_tokens": 9999})
     check("15 empty window: no reflection call", ref_none["status"] == "not_run" and ref_none["attempts"] == []
           and ref_none["reflection"] is None)
     check("15 reflection retried under rule 5, text and tokens kept", ref_ok["status"] == "ok" and ref_ok["n_attempts"] == 2
-          and ref_ok["reflection"] == "look again" and ref_ok["completion_tokens"] == 10 and ref_ok["over_cap"] is False)
+          and ref_ok["reflection"] == "look again" and ref_ok["completion_tokens"] == 10)
     check("15 reflection without text fails after retries, no text", ref_bad["status"] == "failed" and ref_bad["n_attempts"] == 3
           and ref_bad["reflection"] is None and ref_bad["attempts"][-1]["failure"] == "a1_reflection_missing")
-    check("15 overrun flagged, text not cut", ref_over["status"] == "ok" and ref_over["over_cap"] is True
-          and ref_over["reflection"] == "long")
+    check("15 no length cap: a long reflection is kept whole, its tokens recorded, no cap field",
+          ref_long["status"] == "ok" and len(ref_long["reflection"]) == 20000 and ref_long["completion_tokens"] == 9999
+          and "over_cap" not in ref_long)
     rows15 = [ap.meta_row(dates[0], good, window=([], []), a1_reflection=ref_none),
               ap.meta_row(dates[1], good, window=([dates[0]], []), a1_reflection=ref_ok)]
     sc15 = pd.concat([ap.score_rows(dates[0], good), ap.score_rows(dates[1], good)], ignore_index=True)
     with tempfile.TemporaryDirectory() as tmp:
         records.write_run(tmp, pnl, sc15, "A1", extra={"run_kind": "offline_check"}, llm_meta=rows15)
-        _, meta5, man5 = records.read_run(tmp)
+        _, meta5, man5 = records.read_run(tmp, "offline_check")
         calls5 = pd.read_parquet(f"{tmp}/llm_calls.parquet")
     m5 = meta5.set_index("decision_date")
     check("15 A1 record: status per date, reflection cost as aux, llm_calls role a1_reflector",
@@ -348,7 +355,8 @@ def main():
           and int(m5.loc[dates[1], "a1_reflection_tokens"]) == 10
           and sorted(calls5.loc[calls5["role"] == ap.A1_REFLECTION_ROLE, "attempt"]) == [1, 2]
           and man5["cost_usd_by_role"].get(ap.A1_REFLECTION_ROLE) == 0.004
-          and man5["a1_reflections"] == {"ok": 1, "failed": 0, "not_run": 1, "over_cap": 0}, man5.get("a1_reflections"))
+          and {k: man5["a1_reflections"][k] for k in ("ok", "failed", "not_run", "failure_rate", "over_disclosure_rate")}
+          == {"ok": 1, "failed": 0, "not_run": 1, "failure_rate": 0.0, "over_disclosure_rate": False}, man5.get("a1_reflections"))
     forged15 = [dict(r) for r in rows15]
     forged15[1]["a1_reflection_status"] = "not_run"
     with tempfile.TemporaryDirectory() as tmp:
@@ -357,12 +365,39 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         check("15 refuses an LLM run without run_kind", refuses(lambda: records.write_run(tmp, pnl, sc15, "A1", llm_meta=rows15)))
     with tempfile.TemporaryDirectory() as tmp:
-        records.write_run(tmp, pnl, sc15, "A0", extra={"run_kind": "pilot", "pilot": ap.PILOT_A0},
+        records.write_run(tmp, pnl, sc15, "A0", extra={"run_kind": "pilot", "pilot": ap.PILOT_A0, "pilot_window": "post_85"},
                           llm_meta=[ap.meta_row(d, good) for d in dates])
-        _, _, man_p = records.read_run(tmp)
+        _, _, man_p = records.read_run(tmp, "pilot_gate")
+        pilot_refused = [refuses(lambda: records.read_run(tmp, p)) for p in ("result", "offline_check")]
     check("15 pilot manifest is marked and refused as a result", man_p["run_kind"] == "pilot"
           and man_p["usable_as_result"] is False and refuses(lambda: records.require_result_run(man_p))
           and records.require_result_run({"run_kind": "main", "usable_as_result": True}))
+
+    # 16. pilot lock, reflection failure disclosure rate (schema 6)
+    rows16 = [ap.meta_row(dates[0], good, window=([dates[0]], []), a1_reflection=ref_ok),
+              ap.meta_row(dates[1], good, window=([dates[0]], []), a1_reflection=ref_bad)]
+    with tempfile.TemporaryDirectory() as tmp:
+        records.write_run(tmp, pnl, sc15, "A1", extra=OFFLINE, llm_meta=rows16)
+        _, meta6, man6 = records.read_run(tmp, "offline_check")
+        offline_refused = [refuses(lambda: records.read_run(tmp, p)) for p in ("result", "pilot_gate")]
+    ls6 = ap.learning_summary(meta6).iloc[0]
+    check("16 A1 reflection failure rate against the 5% disclosure rate, per arm, in summary and manifest",
+          ls6["a1_reflection_failure_rate"] == 0.5 and bool(ls6["a1_reflection_failure_over_disclosure_rate"])
+          and man6["a1_reflections"]["failure_rate"] == 0.5 and man6["a1_reflections"]["over_disclosure_rate"] is True
+          and man6["a1_reflections"]["disclosure_rate"] == ap.REFLECTION_FAILURE_DISCLOSURE_RATE == 0.05, ls6.to_dict())
+    check("16 A2 Reflector failure rate over processed maturities", abs(ls["reflector_failure_rate"] - 0.5) < 1e-12
+          and bool(ls["reflector_failure_over_disclosure_rate"]), ls.to_dict())
+    check("16 read_run purposes: a pilot opens only for the gate, an offline run never as a result or for the gate",
+          all(pilot_refused) and all(offline_refused) and refuses(lambda: records.read_run(".", "anything")), (pilot_refused, offline_refused))
+    with tempfile.TemporaryDirectory() as tmp:
+        lock = [refuses(lambda: records.write_run(tmp, pnl, sc15, "A0", extra={"run_kind": "pilot"}, llm_meta=rows15)),
+                refuses(lambda: records.write_run(tmp, pnl, sc15, "A0", extra={"run_kind": "offline_check", "pilot_window": "long_2025_05"},
+                                                  llm_meta=rows15)),
+                refuses(lambda: records.write_run(tmp, pnl, sc15, "A0", extra={"run_kind": "pilot", "pilot_window": "other"},
+                                                  llm_meta=rows15)),
+                refuses(lambda: records.write_run(tmp, pnl, sc15, "A0", extra={"run_kind": "main"}, llm_meta=rows15))]
+    check("16 write refuses a pilot without its window, a window on a non-pilot, an unknown window, and a main run "
+          "that is not exactly one CONDITIONS window", all(lock), lock)
     print("ALL PASS")
 
 

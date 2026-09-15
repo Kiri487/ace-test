@@ -20,8 +20,10 @@ The A1 window is not a scenario variable: its format is decided (2026-09-15,
 arm_protocol.A1_WINDOW_FORMAT = "with_reasoning"), so every scenario uses the measured
 per-decision median with reasoning (2,455 tokens). A1 is two calls (A1_CALLS_PER_DECISION = 2):
 the reflection's output length is the one A1 assumption - low / mid / high = 0.5 / 1.0 / 1.5 x
-A1_REFLECTION_CAP_TOKENS (1,300), the cap being an instruction that can be overrun.
-Also printed: the A0 gate pilot (one seed, post-cutoff only), outside the 18-run matrix.
+A1_REFLECTION_REFERENCE_TOKENS (1,300), a reference length and not a cap (nothing constrains the
+reflection; real output can exceed high - see CAVEATS).
+Also printed, outside the 18-run matrix: the A0 gate pilot, one seed each - post_85, long_2025_05,
+and news_ablation (17 post dates with headlines removed, and the same 17 repeated unchanged).
 
 Arm protocol assumed (arm-interleaving-protocol): A0 one generation per date; A1, once a decision
 has matured, one reflection call over the template plus the window of up to 5 matured decisions
@@ -49,11 +51,11 @@ from ace.prompts.generator import GENERATOR_PROMPT
 from ace.prompts.reflector import REFLECTOR_PROMPT
 
 from . import alpha, data_snapshot, market, news, panel, records
-from .arm_protocol import (A1_CALLS_PER_DECISION, A1_REFLECTION_CAP_TOKENS, A1_REFLECTION_CAP_WORDS,
-                           A1_REFLECTION_CAP_ZH_CHARS, A1_WINDOW_FORMAT, analyse)
-from .decision_input import build_decision_input
+from .arm_protocol import (A1_CALLS_PER_DECISION, A1_REFLECTION_REFERENCE_TOKENS, A1_WINDOW_FORMAT,
+                           PILOT_NEWS_ABLATION_EVERY, analyse)
+from .decision_input import build_decision_input, without_news
 from .format_trial import QUESTION, company_names, load_tokenizer, render_context
-from .replay import CONDITIONS          # the only place the two phase-one windows are written
+from .replay import CONDITIONS, PILOT_WINDOWS   # the only place the windows are written
 from .roles import A1_REFLECTION_PROMPT
 
 SEEDS = 3
@@ -81,6 +83,11 @@ CAVEATS = {
         "Time is completion tokens x seconds per completion token from ~12k-token trial prompts; the extra "
         "prefill of longer A1 and A2 prompts is not modelled - so A1's reflection prompt (~12.5k-token window "
         "once full) raises prompt tokens and cost in this table but not its hours; only its output adds hours."),
+    "a1_reflection_length": (
+        "A1's reflection length is not constrained (no length instruction, no max_tokens below the shared limit), so "
+        "the 0.5 / 1.0 / 1.5 x 1,300 scenarios are references, not bounds: real output can exceed the high scenario. "
+        "The A0 pilot cannot measure it (A0 has no reflection); the first real numbers come when A1 runs, and the "
+        "first decision points' reflection lengths are to be reported to decide whether to re-estimate."),
 }
 HIGH_LIMIT = "p90/max over 5 trial calls; not a tail estimate (see caveats)"
 TABLE_DEPENDS_ON = "A2 ~3 calls/decision = v9 §10.1 (二) max_num_rounds=1 (decided); invalid if refinement were restored"
@@ -136,10 +143,12 @@ def reasoning_mode_content_ratio(trial_calls):
             "ratio": float(np.mean(nr) / np.mean(visible))}
 
 
-def a0_prompts(dates, index, cfg, names, ntok, playbook):
+def a0_prompts(dates, index, cfg, names, ntok, playbook, strip_news=False):
     rows = []
     for T in dates:
         inp = build_decision_input(index, T, cfg)
+        if strip_news:
+            inp = without_news(inp)
         context, _, _ = render_context(inp, names)
         prompt = GENERATOR_PROMPT.format(playbook, "(empty)", QUESTION, context)
         rows.append({"date": T, "prompt": ntok(prompt) + JSON_MODE_OVERHEAD, "context": ntok(context)})
@@ -260,6 +269,14 @@ def arm_runs(p, S, T):
     }
 
 
+def a0_only(p, S):
+    """A0 generations over a prompt table, one call per row (the pilot runs)."""
+    v = np.zeros(5)
+    for x in p["prompt"].to_numpy():
+        v += call(x, S["gen_completion"], S["s_per_tok"])
+    return v * S["retry_factor"]
+
+
 def fmt_row(label, v, seeds=1):
     p, c, s, cost, n = v * seeds
     return {"arm": label, "calls": int(round(n)), "prompt_M_tokens": round(p / 1e6, 2),
@@ -289,6 +306,13 @@ def main():
     index, _ = news.build(cfg)
     windows = {k: panel.decision_dates(*v) for k, v in CONDITIONS.items()}
     prompts = {k: a0_prompts(d, index, cfg, names, ntok, playbook) for k, d in windows.items()}
+    pilot_prompts = {
+        "post_85": prompts["post"],
+        "long_2025_05": a0_prompts(panel.decision_dates(*PILOT_WINDOWS["long_2025_05"]), index, cfg, names, ntok, playbook),
+        "news_ablation_no_news": a0_prompts(windows["post"][::PILOT_NEWS_ABLATION_EVERY], index, cfg, names, ntok,
+                                            playbook, strip_news=True),
+        "news_ablation_repeat": prompts["post"].iloc[::PILOT_NEWS_ABLATION_EVERY],
+    }
 
     ds_growth = growth[(growth["backbone"] == "deepseek-v4-flash") & growth["tokens_per_curator_call"].notna()]
     g_all = growth[growth["tokens_per_curator_call"].notna()]["tokens_per_curator_call"]
@@ -297,11 +321,10 @@ def main():
     gen = trial["completion_tokens"]
     spt = trial["s_per_completion_token"]
     a1_tok = win["per_decision_with_reasoning"]["median"]      # the decided format, in every scenario
-    cap = A1_REFLECTION_CAP_TOKENS    # reflection length: half the cap / the cap / 1.5x (an instruction can be overrun)
+    cap = A1_REFLECTION_REFERENCE_TOKENS   # reference length, not a cap: 0.5 / 1.0 / 1.5x; real output may exceed high
 
     T = {**tmpl, "a1_header": win["header"], "ground_truth": win["ground_truth_block"]["median"],
-         "a1_reflection_template": ntok(A1_REFLECTION_PROMPT.format(
-             n=WINDOW_K, question=QUESTION, window="", words=A1_REFLECTION_CAP_WORDS, zh_chars=A1_REFLECTION_CAP_ZH_CHARS))}
+         "a1_reflection_template": ntok(A1_REFLECTION_PROMPT.format(n=WINDOW_K, question=QUESTION, window=""))}
     scenarios = {
         "low": {"gen_completion": gen["min"], "s_per_tok": spt["mean"], "a1_per_decision": a1_tok, "a1_reflection": 0.5 * cap,
                 "growth": float(g_all.min()), "reflector_completion": rc["median"], "curator_completion": cc["median"],
@@ -384,9 +407,13 @@ def main():
                         "window_k": WINDOW_K, "per_decision_tokens_used": a1_tok,
                         "window5_tokens_measured": win["window5_with_reasoning"],
                         "reflection_template_tokens": T["a1_reflection_template"],
-                        "reflection_cap_tokens": A1_REFLECTION_CAP_TOKENS,
+                        "reflection_reference_tokens": A1_REFLECTION_REFERENCE_TOKENS,
+                        "reflection_length": "not constrained; scenarios are references, not bounds",
                         "reflection_completion_by_scenario": {sc: S["a1_reflection"] for sc, S in scenarios.items()}},
-        "a0_pilot_one_seed_post": {sc: fmt_row("A0 pilot (1 seed, post)", results[(sc, "post")]["A0"], 1) for sc in scenarios},
+        "a0_pilot": {sc: {**{k: fmt_row(k, a0_only(p, S), 1) for k, p in pilot_prompts.items()},
+                          "total": fmt_row("pilot total", sum(a0_only(p, S) for p in pilot_prompts.values()), 1)}
+                     for sc, S in scenarios.items()},
+        "a0_pilot_prompt_tokens": {k: dist(p["prompt"]) for k, p in pilot_prompts.items()},
         "decision_dates": {k: {"count": int(len(d)), "first": str(d[0].date()), "last": str(d[-1].date())} for k, d in windows.items()},
         "a0_prompt_tokens": {k: dist(p["prompt"]) for k, p in prompts.items()},
         "context_tokens": {k: dist(p["context"]) for k, p in prompts.items()},
@@ -414,7 +441,7 @@ def main():
     banner = "\n".join(f"!! {k}: {v}" for k, v in CAVEATS.items())
     print("== CAVEATS\n" + banner)
     pd.set_option("display.width", 250)
-    for k in ("conditions", "data_last_dates", "a1_protocol", "decision_dates", "a0_prompt_tokens", "context_tokens", "trial", "reasoning_mode_content_ratio",
+    for k in ("conditions", "data_last_dates", "a1_protocol", "a0_pilot", "a0_pilot_prompt_tokens", "decision_dates", "a0_prompt_tokens", "context_tokens", "trial", "reasoning_mode_content_ratio",
               "templates", "a1_window", "ace_role_sizes_deepseek_runs", "scenarios", "a2_playbook_tokens",
               "baseline_mid_total", "tail", "v8_formula_recomputed_hours"):
         print(f"\n== {k}\n{json.dumps(out[k], ensure_ascii=False, default=str, indent=1)}")

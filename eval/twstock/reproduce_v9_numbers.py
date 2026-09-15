@@ -46,7 +46,7 @@ V9_TEXT = {
 
 
 def factor_numbers(name):
-    dec, _, _ = records.read_run(KNOWN_ANSWER / name)
+    dec, _, _ = records.read_run(KNOWN_ANSWER / name, "offline_check")
     dates = panel.decision_dates(*WINDOW)
     saved = json.loads((KNOWN_ANSWER / "summary.json").read_text(encoding="utf-8"))
     saved = saved["factors"][name]["test_window"]

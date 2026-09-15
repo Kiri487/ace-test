@@ -72,26 +72,40 @@ A1 rolling window, decided by the user 2026-09-15 (settled; not to be reopened)
     baseline - the same reason as for the format.
     Before the first maturity (or when every slot is void) the window is empty: no reflection call,
     the Generator gets "(empty)", one call that date.
-    The reflection call follows rule 5's retries. If it still fails (A1_REFLECTION_FAILURE_RULE) the
-    date is still generated, with "(empty)" in the reflection slot, and the failure is counted apart
-    (a1_reflection_status = failed) - the analogue of A2 generating on its last playbook when its
-    Reflector fails. Recorded as this code's rule; the user has not ruled on it yet.
-    Length: A1_REFLECTION_CAP_TOKENS = 1,300, stated in the prompt as about 700 English words or about
-    1,500 Chinese characters (1.86 tokens per English word, measured on the five non-reasoning trial
-    reasonings; 0.84 per Chinese character, measured on the 2026-05-19 headlines; local
-    DeepSeek-V4-Flash tokenizer). Basis, set before any A1 call: parity with A2's Reflector output,
-    whose mid budget estimate is 1,268 tokens (FiNER DeepSeek Reflector median 416 x the 3.05
-    non-reasoning ratio), rounded up. It is an instruction, not max_tokens: a small max_tokens made
-    every ClinePass call a 500 (2026-09-03) and a truncated JSON answer is unusable. Each reflection's
-    completion tokens are recorded and an overrun is flagged (a1_reflection_over_cap), never cut.
+    The reflection call follows rule 5's retries. If it still fails (A1_REFLECTION_FAILURE_RULE,
+    accepted by the user 2026-09-15) the date is still generated, with "(empty)" in the reflection slot,
+    and the failure is counted apart (a1_reflection_status = failed) - consistent with §5.2.0's rule for
+    A2's Reflector.
+    Length (revised 2026-09-15): measured, not constrained. ACE's REFLECTOR_PROMPT carries no length
+    instruction and A2's Reflector no cap, so A1's reflection prompt carries none either: a length
+    sentence in A1's prompt alone would tighten A1 alone. No max_tokens beyond the shared MAX_TOKENS, no
+    truncation. Every reflection's completion tokens are recorded (llm_calls rows with role a1_reflector,
+    beside role reflector for A2; a1_reflection_tokens per date) and reflection_lengths.compare sets the two
+    distributions side by side. A1_REFLECTION_REFERENCE_TOKENS (1,300) is only the budget's reference
+    length; real output can exceed the budget's high scenario, and the first real number comes when A1
+    runs (A0 has no reflection).
 
-A0 pilot, decided by the user 2026-09-15
+Reflection failures (user, 2026-09-15)
+    Asymmetry to record: when A2's Reflector fails its playbook misses one update but is still there;
+    A1's reflection is all of A1's memory that day, so a date whose reflection fails is in effect A0.
+    A failure rate that is not low pulls A1 toward A0 and biases RQ2. learning_summary reports the rate
+    per arm (A1 reflection dates, A2 processed maturities); above REFLECTION_FAILURE_DISCLOSURE_RATE (5%)
+    the thesis gets a section on it. Fixed before any A1/A2 call; not to be changed after running.
+
+A0 pilot, decided by the user 2026-09-15 (two rulings)
     A0 run alone does not meet §5.2.0 (arms interleaved on the same date so the host mix cannot line
-    up with the arm), so it can never be the thesis's A0. The first A0 run is a gate pilot only
-    (PILOT_A0): one seed, the post-cutoff condition (85 dates), judged by the criteria file committed
-    before it runs. The real A0 is rerun interleaved with A1 and A2; no pilot number enters a result
-    table. Its manifest says run_kind = "pilot" and usable_as_result = false, and
-    records.require_result_run refuses it.
+    up with the arm), so it can never be the thesis's A0. The first A0 runs are a gate pilot only
+    (PILOT_A0), one seed each, judged by eval/twstock/a0_pilot_gate.md, committed before they run:
+      post_85        the post-cutoff condition, 2026-04-27..08-26 (85 dates)
+      long_2025_05   2025-05-01..2026-08-26 (the §5.0 option not adopted): possibly contaminated, so a
+                     pass is ambiguous and a fail is strong evidence; reported apart, never merged or averaged
+      news_ablation  the post_85 dates with index % 5 == 0 (17), once with the headlines removed and once
+                     repeated unchanged (run-to-run noise), for the gate's news-dependence check
+    The real A0 is rerun interleaved with A1 and A2. PILOT_LOCK: pilot data - above all long_2025_05 - never
+    enter a result table, a power analysis or a manifest's result fields. In code: run_kind = "pilot",
+    usable_as_result = false, pilot_window named; records.read_run(purpose="result") and require_result_run
+    refuse a pilot; a pilot can be read only with purpose="pilot_gate"; a main run must cover exactly one
+    replay.CONDITIONS window, so the long window can never be written as a main run.
 
 Cost (v9.3 §6.4): every attempt keeps the usage.cost the gateway metered with its answer;
 meta_row sums it per date (cost_usd for generation, aux_cost_usd for Reflector + Curator) and
@@ -123,16 +137,24 @@ A1_CALLS_REASON = (
     "Generator it would stop being rolling-window reflection (RQ2, §4.3). A2 digests experience in two "
     "extra calls, so a single call for A1 would weaken the baseline")
 A1_REFLECTION_ROLE = "a1_reflector"
-A1_REFLECTION_CAP_TOKENS = 1300
-A1_REFLECTION_CAP_WORDS = 700           # 1,300 / 1.86 tokens per English word
-A1_REFLECTION_CAP_ZH_CHARS = 1500       # 1,300 / 0.84 tokens per Chinese character, rounded down
-A1_REFLECTION_CAP_BASIS = (
-    "parity with A2's Reflector output: budget mid estimate 1,268 tokens (FiNER DeepSeek Reflector median "
-    "416 x 3.05 non-reasoning ratio), rounded up; words and characters from measured 1.86 tokens per "
-    "English word and 0.84 per Chinese character; an instruction, not max_tokens; overruns flagged, not cut")
-A1_REFLECTION_FAILURE_RULE = "generate_with_empty_reflection"   # the code's rule; not yet ruled on by the user
+A1_REFLECTION_REFERENCE_TOKENS = 1300   # budget reference length only: not a cap, not in any prompt
+A1_REFLECTION_REFERENCE_BASIS = (
+    "A2 Reflector output, mid budget estimate 1,268 tokens (FiNER DeepSeek Reflector median 416 x 3.05 "
+    "non-reasoning ratio), rounded - an estimate of A2, not a limit on it. ACE's REFLECTOR_PROMPT has no length "
+    "instruction and no cap, so A1's reflection prompt has none either (revised 2026-09-15)")
+A1_REFLECTION_FAILURE_RULE = "generate_with_empty_reflection"   # accepted by the user 2026-09-15
+REFLECTION_FAILURE_DISCLOSURE_RATE = 0.05
+REFLECTION_FAILURE_DISCLOSURE_BASIS = (
+    "set by the user 2026-09-15 before any A1/A2 call: an A1 date whose reflection fails is in effect A0 that day, "
+    "so a failure rate that is not low pulls A1 toward A0 and biases RQ2; above 5% of an arm's reflection attempts "
+    "(A1 reflection dates, A2 processed maturities) the thesis gets a section on it; not to be changed after running")
 RUN_KINDS = ("offline_check", "pilot", "main")
-PILOT_A0 = {"run_kind": "pilot", "arm": "A0", "condition": "post", "seeds": 1, "usable_as_result": False,
+PILOT_RUN_WINDOWS = ("post_85", "long_2025_05", "news_ablation")   # dates: replay.PILOT_WINDOWS
+PILOT_NEWS_ABLATION_EVERY = 5           # news_ablation: post_85 dates whose index % 5 == 0 (17 dates)
+PILOT_LOCK = ("pilot data - above all long_2025_05 - never enter a result table, a power analysis or a manifest's "
+              "result fields (user, 2026-09-15; v9.3 §5.0 warns against extending the period after seeing results)")
+PILOT_A0 = {"run_kind": "pilot", "arm": "A0", "seeds": 1, "usable_as_result": False,
+            "windows": PILOT_RUN_WINDOWS, "gate": "eval/twstock/a0_pilot_gate.md", "lock": PILOT_LOCK,
             "purpose": "gate: do headlines carry enough signal to make the A1/A2 comparison meaningful",
             "why_not_a_result": "A0 alone is not interleaved with A1/A2 on the same dates (v9.3 §5.2.0); the "
                                 "real A0 is rerun interleaved"}
@@ -384,18 +406,18 @@ def a1_reflection_check(response):
     return None if isinstance(text, str) and text.strip() else "a1_reflection_missing"
 
 
-def process_a1_reflection(slots, reflect_call, check=a1_reflection_check, cap_tokens=A1_REFLECTION_CAP_TOKENS):
+def process_a1_reflection(slots, reflect_call, check=a1_reflection_check):
     """A1 step 1 on one decision date. No usable slot: no call. Otherwise one reflection under rule 5;
-    if it fails, the Generator's reflection slot stays "(empty)" (A1_REFLECTION_FAILURE_RULE)."""
+    if it fails, the Generator's reflection slot stays "(empty)" (A1_REFLECTION_FAILURE_RULE).
+    Its length is only measured (completion_tokens), never capped."""
     if not slots:
         return {"status": "not_run", "reflection": None, "attempts": [], "n_attempts": 0, "n_retries": 0,
-                "completion_tokens": None, "over_cap": None}
+                "completion_tokens": None}
     r = run_aux_call(reflect_call, A1_REFLECTION_ROLE, check)
     ok = r["status"] == "ok"
-    tokens = r["attempts"][-1].get("completion_tokens") if ok else None
     return {"status": r["status"], "reflection": json.loads(r["response"])["reflection"] if ok else None,
             "attempts": r["attempts"], "n_attempts": r["n_attempts"], "n_retries": r["n_retries"],
-            "completion_tokens": tokens, "over_cap": None if tokens is None else bool(tokens > cap_tokens)}
+            "completion_tokens": r["attempts"][-1].get("completion_tokens") if ok else None}
 
 
 def score_rows(decision_date, outcome):
@@ -473,7 +495,6 @@ def meta_row(decision_date, outcome, maturity=None, window=None, a1_reflection=N
             "a1_reflection_attempts": a1_reflection["n_attempts"],
             "a1_reflection_retries": a1_reflection["n_retries"],
             "a1_reflection_tokens": a1_reflection["completion_tokens"],
-            "a1_reflection_over_cap": a1_reflection["over_cap"],
             "aux_cost_usd": total_cost(a1_reflection["attempts"]),
             "aux_attempts_json": json.dumps(a1_reflection["attempts"], ensure_ascii=False, default=str),
         })
@@ -534,9 +555,19 @@ def learning_summary(meta):
             row.update({"window_slots_skipped_void": int(w.sum()), "dates_with_short_window": int((w > 0).sum())})
         if "a1_reflection_status" in g and g["a1_reflection_status"].notna().any():
             st = g["a1_reflection_status"]
+            attempted = int(st.isin(["ok", "failed"]).sum())
+            rate = int((st == "failed").sum()) / attempted if attempted else float("nan")
             row.update({"a1_reflection_ok": int((st == "ok").sum()), "a1_reflection_failed": int((st == "failed").sum()),
                         "a1_reflection_not_run": int((st == "not_run").sum()),
                         "a1_reflection_retries": int(g["a1_reflection_retries"].fillna(0).sum()),
-                        "a1_reflection_over_cap": int(g["a1_reflection_over_cap"].fillna(False).astype(bool).sum())})
+                        "a1_reflection_failure_rate": rate,
+                        "a1_reflection_failure_over_disclosure_rate": bool(rate > REFLECTION_FAILURE_DISCLOSURE_RATE)
+                        if attempted else None})
+        if row.get("maturities_due") is not None:
+            processed = row["maturities_due"] - row["maturities_skipped_void"]
+            rate = row["reflector_failed"] / processed if processed else float("nan")
+            row.update({"reflector_failure_rate": rate,
+                        "reflector_failure_over_disclosure_rate": bool(rate > REFLECTION_FAILURE_DISCLOSURE_RATE)
+                        if processed else None})
         rows.append(row)
     return pd.DataFrame(rows)

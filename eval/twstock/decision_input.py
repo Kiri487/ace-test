@@ -80,6 +80,14 @@ def build_decision_input(index, T, cfg):
     )
 
 
+def without_news(inp):
+    """The same decision input with every headline removed: the A0 pilot's news-ablation run
+    (arm_protocol.PILOT_A0). Universe, dates and window bounds are unchanged; render_context then says 0 articles."""
+    from dataclasses import replace
+    return replace(inp, news_by_stock={s: [] for s in inp.news_by_stock}, market_news=[],
+                   provenance={**inp.provenance, "news_ablation": "all headlines removed"})
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", default="2026-06-01")

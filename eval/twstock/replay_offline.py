@@ -38,8 +38,9 @@ P1 Prompt memory isolation, on every Generator request as sent, per condition an
    at least one A1 Generator prompt carries a reflection.
  f A1 reflection (new, 2026-09-15, before its first run): requests exist exactly on the A1 dates whose window is
    non-empty (arm_protocol.window_indices over A1's voids), every one before that date's first A1 Generator
-   request; each prompt matches A1_REFLECTION_PROMPT with n == window size, question == QUESTION, the word
-   and character caps of arm_protocol, and a window listing exactly the non-void A1 decisions among maturity
+   request; each prompt matches A1_REFLECTION_PROMPT with n == window size, question == QUESTION (the word and
+   character cap fields were removed with the length instruction on 2026-09-15, second ruling, before this
+   version's first run), and a window listing exactly the non-void A1 decisions among maturity
    slots j-15..j-11, oldest first, each with maturity date = decision + 11 sessions, every member in universe
    order, score == A1's own recorded score (+.2f), alpha == the panel's alpha_h10 (+.2f%, NA when missing);
    its tokens are exactly 〔TRACE A1 d〕 for the listed d. FakeLLM stamps a reflection with 〔REFL A1 t〕 taken
@@ -214,7 +215,7 @@ GEN_RE = template_regex(GENERATOR_PROMPT, ["playbook", "reflection", "question",
 REF_RE = template_regex(REFLECTOR_PROMPT, ["question", "trace", "predicted", "ground_truth", "env", "bullets"])
 CUR_RE = template_regex(CURATOR_PROMPT, ["token_budget", "current_step", "total_samples", "playbook_stats",
                                          "recent_reflection", "current_playbook", "question_context"])
-A1R_RE = template_regex(roles.A1_REFLECTION_PROMPT, ["n", "question", "window", "words", "zh_chars"])
+A1R_RE = template_regex(roles.A1_REFLECTION_PROMPT, ["n", "question", "window"])
 
 
 def split(regex, prompt):
@@ -426,10 +427,9 @@ def setup(args, out):
     mid = env.budget["scenarios"]["mid"]
     env.fake = FakeLLM(tok, envelope, trial_reasonings,
                        {"reflector": mid["reflector_completion"], "curator": mid["curator_completion"], "growth": mid["growth"],
-                        "a1_reflection": ap.A1_REFLECTION_CAP_TOKENS})
+                        "a1_reflection": ap.A1_REFLECTION_REFERENCE_TOKENS})
     env.a1_template_tokens = tok(roles.A1_REFLECTION_PROMPT.format(
-        n=rp.WINDOW_K, question=QUESTION, window="", words=ap.A1_REFLECTION_CAP_WORDS,
-        zh_chars=ap.A1_REFLECTION_CAP_ZH_CHARS)) + JSON_MODE_OVERHEAD
+        n=rp.WINDOW_K, question=QUESTION, window="")) + JSON_MODE_OVERHEAD
     for cond, c in env.cond.items():
         for (arm, j, role), plan in FAULTS.items():
             env.fake.faults[(cond, arm, c["dates"][j], role)] = plan
@@ -561,9 +561,7 @@ def verify(env, run):
                 if e["i"] > first_a1_gen[d]:
                     bad.append((e["call_id"], "after generation"))
                 m = A1R_RE.match(e["prompt"])
-                if not m or int(m.group("n")) != len(expected) or m.group("question") != QUESTION \
-                        or int(m.group("words")) != ap.A1_REFLECTION_CAP_WORDS \
-                        or int(m.group("zh_chars")) != ap.A1_REFLECTION_CAP_ZH_CHARS:
+                if not m or int(m.group("n")) != len(expected) or m.group("question") != QUESTION:
                     bad.append((e["call_id"], "template"))
                     continue
                 if sorted(TOKEN_RE.findall(e["prompt"])) != sorted(("TRACE", "A1", str(x.date())) for x in expected):
@@ -805,7 +803,7 @@ def verify(env, run):
         by_gen = {x["generation_id"]: x for x in plog if x.get("generation_id")}
         bad, n = [], 0
         for arm in rp.ARMS:
-            _, m, _ = records.read_run(run["written"][arm])
+            _, m, _ = records.read_run(run["written"][arm], "offline_check")
             for col in ("attempts_json", "aux_attempts_json"):
                 if col not in m:
                     continue
@@ -828,7 +826,7 @@ def verify(env, run):
         bad, n_rows, total_rows = [], 0, 0.0
         for arm in rp.ARMS:
             calls = pd.read_parquet(run["written"][arm] / "llm_calls.parquet")
-            _, m, man = records.read_run(run["written"][arm])
+            _, m, man = records.read_run(run["written"][arm], "offline_check")
             n_rows += len(calls)
             want = sum(1 for e in reqs if e["arm"] == arm)
             if len(calls) != want or man.get("llm_calls") != want:
@@ -898,7 +896,7 @@ def verify(env, run):
     def p6d():
         ok = True
         for arm in rp.ARMS:
-            _, m, _ = records.read_run(run["written"][arm])
+            _, m, _ = records.read_run(run["written"][arm], "offline_check")
             ok &= len(m) == len(dates)
         bt = pd.read_parquet(run["written"]["A2"] / "playbook_bullets.parquet")
         return ok and len(bt) == sum(len(r["added"]) for r in commits), len(bt)
@@ -941,7 +939,7 @@ def token_rows(env, run, reqs):
                 row["estimate_mid"] = a0[j]
             elif e["arm"] == "A1":
                 k = min(rp.WINDOW_K, max(0, j - rp.DELAY + 1))
-                row["estimate_mid"] = a0[j] + (ap.A1_REFLECTION_CAP_TOKENS if k else 0)
+                row["estimate_mid"] = a0[j] + (ap.A1_REFLECTION_REFERENCE_TOKENS if k else 0)
                 row["reflection_slot_tokens"] = e["prompt_tokens_local"] - a0[j]
             else:
                 row["estimate_mid"] = a0[j] + mid["growth"] * max(0, j - rp.DELAY + 1)
@@ -1130,6 +1128,10 @@ def main():
               "phases": "decision-date index split in thirds; Reflector/Curator by harvest index",
               "a1_samples": samples, "summary": summarise_tokens(rows)}
     records.to_json(tokens, out / "tokens.json")
+    from . import reflection_lengths
+    records.to_json({f"{c}_{f}": reflection_lengths.compare([out / f"{c}_{f}" / "records" / a for a in ("A1", "A2")],
+                                                            "offline_check")
+                     for c in args.conditions for f in args.formats}, out / "reflection_lengths.json")
     records.to_json({"created_at": _dt.datetime.now().isoformat(timespec="seconds"), "git": records.git_state(),
                      "conditions": args.conditions, "formats": args.formats, "requests": len(env.fake.log),
                      "checks": CHECKS, "all_pass": all(x["pass"] for x in CHECKS)}, out / "checks.json")
