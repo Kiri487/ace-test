@@ -75,18 +75,28 @@ def arm_order_uniformity(seed, n_dates, arms=None):
             "chi2_p": float(chisquare(list(counts.values())).pvalue)}
 
 
-def manifest_fields(seed=ARM_ORDER_SEED):
-    """Arm-order and arm-protocol provenance for records.write_run(extra=...)."""
-    return {"arm_order_seed": seed, "arm_order_seed_rule": ARM_ORDER_SEED_RULE,
-            "arm_order_seed_reason": ARM_ORDER_SEED_REASON,
-            "arm_order_uniformity": {label: arm_order_uniformity(seed, n)
-                                     for label, n in (("post_85", 85), ("pre_75", 75))},
-            "conditions": CONDITIONS,
-            "a1_window": {"k": WINDOW_K, "format": ap.A1_WINDOW_FORMAT,
-                          "calls_per_decision": ap.A1_CALLS_PER_DECISION,
-                          "decided": "2026-09-15 (user)", "reason": ap.A1_WINDOW_FORMAT_REASON,
-                          "tokens_reference": "about 2,455 per decision (mean 2,490), 12,466 for a full window of 5; "
-                                              "results/budget/budget_20260914_120638.json"}}
+def manifest_fields(run_kind, seed=ARM_ORDER_SEED):
+    """Run kind, arm-order and arm-protocol provenance for records.write_run(extra=...)."""
+    if run_kind not in ap.RUN_KINDS:
+        raise ValueError(f"run_kind must be one of {ap.RUN_KINDS}, got {run_kind!r}")
+    out = {"run_kind": run_kind, "usable_as_result": run_kind == "main",
+           "arm_order_seed": seed, "arm_order_seed_rule": ARM_ORDER_SEED_RULE,
+           "arm_order_seed_reason": ARM_ORDER_SEED_REASON,
+           "arm_order_uniformity": {label: arm_order_uniformity(seed, n)
+                                    for label, n in (("post_85", 85), ("pre_75", 75))},
+           "conditions": CONDITIONS,
+           "a1_window": {"k": WINDOW_K, "format": ap.A1_WINDOW_FORMAT, "format_reason": ap.A1_WINDOW_FORMAT_REASON,
+                         "calls_per_decision": ap.A1_CALLS_PER_DECISION, "calls_reason": ap.A1_CALLS_REASON,
+                         "decided": "2026-09-15 (user; calls corrected from 1 to 2 the same day)",
+                         "reflection_role": ap.A1_REFLECTION_ROLE,
+                         "reflection_cap": {"tokens": ap.A1_REFLECTION_CAP_TOKENS, "english_words": ap.A1_REFLECTION_CAP_WORDS,
+                                            "chinese_chars": ap.A1_REFLECTION_CAP_ZH_CHARS, "basis": ap.A1_REFLECTION_CAP_BASIS},
+                         "reflection_failure_rule": ap.A1_REFLECTION_FAILURE_RULE,
+                         "tokens_reference": "about 2,455 per decision (mean 2,490), 12,466 for a full window of 5; "
+                                             "results/budget/budget_20260914_120638.json"}}
+    if run_kind == "pilot":
+        out["pilot"] = ap.PILOT_A0
+    return out
 
 
 class LookaheadError(LookupError):
@@ -173,6 +183,14 @@ class Slot:
     outcome: object
     reasoning: object = None     # the generation's "reasoning" field, when it has one
     matured_on: object = None
+
+
+@dataclass(frozen=True)
+class A1Input:
+    """What A1's Generator gets on one date: the window it reflected on and the reflection text
+    (None when there was no usable slot or the reflection failed)."""
+    slots: tuple
+    reflection: object
 
 
 @dataclass(frozen=True)
@@ -271,11 +289,15 @@ def _reasoning_of(response):
 
 def run_replay(calendar, decision_dates, universe, generate, reflect, curate, outcomes, seed,
                delay=DELAY, arms=ARMS, memories=None,
-               reflector_check=ap.json_object_check, curator_check=ap.json_object_check):
+               reflector_check=ap.json_object_check, curator_check=ap.json_object_check,
+               reflect_a1=None, a1_reflection_check=ap.a1_reflection_check):
     """Replay one condition.
 
     universe: one list for every date, or a mapping decision date -> point-in-time list.
     generate(arm, decision_date, snapshot, attempt_no) -> {"response": str, ...}
+        with reflect_a1 given, A1's snapshot argument is an A1Input (slots and reflection text)
+    reflect_a1(decision_date, slots, attempt_no)      -> {"response": str, ...}   (A1 step 1, once per
+        date with a usable slot, before its generation; arm_protocol.process_a1_reflection)
     reflect(decision, realized, attempt_no)           -> {"response": str, ...}   (A2 only)
     curate(snapshot, reflection, decision, attempt_no) -> {"response": str, ...}
     memories: fresh {"A0", "A1", "A2"} memory objects; the A2 one must offer commit(maturity,
@@ -340,8 +362,13 @@ def run_replay(calendar, decision_dates, universe, generate, reflect, curate, ou
             if arm in ("A1", "A2"):
                 _assert_no_future_feedback(arm, snapshot, day, calendar, delay)
             members = universe[day] if isinstance(universe, dict) else universe
+            a1_ref, gen_input = None, snapshot
+            if arm == "A1" and reflect_a1 is not None:
+                a1_ref = ap.process_a1_reflection(
+                    tuple(snapshot), lambda n, s=snapshot: reflect_a1(day, s, n), check=a1_reflection_check)
+                gen_input = A1Input(tuple(snapshot), a1_ref["reflection"])
             outcome = ap.run_decision(
-                lambda n, arm=arm, snapshot=snapshot: generate(arm, day, snapshot, n), members)
+                lambda n, arm=arm, g=gen_input: generate(arm, day, g, n), members)
             mature = calendar.shift(day, delay)
             scores = None if outcome["voided"] else MappingProxyType(dict(outcome["scores"]))
             last = outcome["attempts"][-1]
@@ -361,6 +388,7 @@ def run_replay(calendar, decision_dates, universe, generate, reflect, curate, ou
             if arm == "A1":
                 gen["memory_sources"] = tuple(s.decision_date for s in snapshot)
                 gen["window_skipped_void"] = memories["A1"].skipped_void()
+                gen["a1_reflection_status"] = a1_ref["status"] if a1_ref else None
                 window = (gen["memory_sources"], gen["window_skipped_void"])
             elif arm == "A2":
                 gen["memory_sources"] = tuple(e.source_decision_date for e in snapshot)
@@ -372,7 +400,7 @@ def run_replay(calendar, decision_dates, universe, generate, reflect, curate, ou
             maturity = None
             if arm == "A2":
                 maturity = maturity_today.get("A2") or ap.process_maturity(None, False, None, None)
-            res.meta_rows[arm].append(ap.meta_row(day, outcome, maturity=maturity, window=window))
+            res.meta_rows[arm].append(ap.meta_row(day, outcome, maturity=maturity, window=window, a1_reflection=a1_ref))
 
     res.unharvested = [d for d in pending if d.mature_date is not None]
     return res

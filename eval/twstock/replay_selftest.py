@@ -266,7 +266,7 @@ def main():
     check("synthetic", "C1 tail: the last 11 decisions have no mature date", s["unmatured"] == 3 * rp.DELAY,
           f"unmatured {s['unmatured']}")
 
-    mf = rp.manifest_fields()
+    mf = rp.manifest_fields("offline_check")
     check("seed", f"C4 arm-order seed {mf['arm_order_seed']} gives chi-square p > 0.5 on 85 and 75 dates",
           all(v['chi2_p'] > 0.5 for v in mf['arm_order_uniformity'].values()), mf['arm_order_uniformity'])
     print(f"  info: arm-order seed {mf['arm_order_seed']}, " +

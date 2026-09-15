@@ -58,6 +58,12 @@ def login():
     global _logged_in
     if _logged_in:
         return
+    if os.environ.get("TWSTOCK_FINLAB_LIVE") != "1":
+        # Frozen snapshot, local reads only (data_snapshot, user 2026-09-15). Live data only on request.
+        from . import data_snapshot
+        data_snapshot.activate()
+        _logged_in = True
+        return
     _load_env_file(ENV_FILE)
     os.makedirs(CACHE_DIR, exist_ok=True)
     data.set_storage(FileStorage(CACHE_DIR))

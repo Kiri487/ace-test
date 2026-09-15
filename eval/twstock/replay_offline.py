@@ -31,12 +31,19 @@ P0 No network: every request goes to http://offline.invalid/; provider-log lines
 P1 Prompt memory isolation, on every Generator request as sent, per condition and A1 format:
  a A0: playbook slot == the ACE empty playbook, reflection == "(empty)", question == QUESTION, context ==
    that date's render_context character for character; no TRACE/SRC/FROM token.
- b A1: playbook, reflection, question as A0; context == render_context, plus "\\n\\n" + window when any
-   decision has matured. The window lists exactly the non-void A1 decisions among maturity slots
-   j-15..j-11 (arm_protocol.window_indices), oldest first, each with maturity date = decision + 11
-   sessions, every member in universe order, score == A1's own recorded score (+.2f), alpha == the panel's
-   alpha_h10 (+.2f%, NA when missing). with_reasoning: the TRACE tokens present are exactly
-   〔TRACE A1 d〕 for the listed d; compact: none. No SRC/FROM token.
+ b A1 Generator (rewritten 2026-09-15 for A1 = two calls, before its first run; the one-call version checked
+   the window inside the context): playbook and question as A0; context == render_context exactly, no
+   window; reflection slot == the "reflection" text of that date's usable A1 reflection, else "(empty)"; the
+   only token in the prompt is 〔REFL A1 t〕 for that date, present exactly when a usable reflection exists;
+   at least one A1 Generator prompt carries a reflection.
+ f A1 reflection (new, 2026-09-15, before its first run): requests exist exactly on the A1 dates whose window is
+   non-empty (arm_protocol.window_indices over A1's voids), every one before that date's first A1 Generator
+   request; each prompt matches A1_REFLECTION_PROMPT with n == window size, question == QUESTION, the word
+   and character caps of arm_protocol, and a window listing exactly the non-void A1 decisions among maturity
+   slots j-15..j-11, oldest first, each with maturity date = decision + 11 sessions, every member in universe
+   order, score == A1's own recorded score (+.2f), alpha == the panel's alpha_h10 (+.2f%, NA when missing);
+   its tokens are exactly 〔TRACE A1 d〕 for the listed d. FakeLLM stamps a reflection with 〔REFL A1 t〕 taken
+   from its call label, because the prompt names only the matured decisions, not t.
  c A2: reflection "(empty)", question QUESTION, context == render_context exactly; playbook slot == the
    playbook text after the last commit on or before t (empty playbook before any) and its sha256 ==
    the attempt's playbook_sha256; no TRACE/SRC token; every FROM token names A2.
@@ -79,6 +86,10 @@ P4 Void and failure paths:
    dates[25]; slot at j=36 vs j=35: same bullet ids and contents, helpful count +1 exactly on the
    bullets its Reflector tagged.
  i Curator not JSON once for j=28: ok after 2 attempts.
+ j (new, 2026-09-15) A1 reflection not JSON x3 at j=20: a1_reflection_status failed after 3 attempts; that
+   date's A1 Generator request has reflection "(empty)"; the decision is not void.
+ k (new, 2026-09-15) A1 reflection without a "reflection" key once at j=22: ok after 2 attempts; its text
+   reaches that date's Generator.
 P5 provider_metadata reaches disk:
  a one provider-log line per request, in order, with its call_id and role; for answered requests
    generation_id, finalProvider, resolvedProvider, modelAttemptCount and usage == what the wire returned;
@@ -91,7 +102,8 @@ P5 provider_metadata reaches disk:
  e (schema 4, added 2026-09-15 with these criteria fixed before its first run) llm_calls.parquet per arm:
    rows == requests the wire received for that arm == manifest llm_calls; an answered row's cost_usd ==
    its provider-log usage.cost exactly, an unanswered row has none; per date, generator rows sum to meta
-   cost_usd and reflector + curator rows to meta aux_cost_usd (both null when no row has a cost), within
+   cost_usd and reflector + curator + a1_reflector rows (the last role added 2026-09-15 with A1's second
+   call) to meta aux_cost_usd (both null when no row has a cost), within
    1e-12; all rows of the label sum to the provider log's usage.cost within 1e-9.
 P6 Structure:
  a Generator requests per (arm, date) == recorded attempts, only on decision dates;
@@ -101,7 +113,8 @@ P6 Structure:
    == bullets added;
  e the analyzer ran once per successful Curator commit, always merge=False, with no request during it.
 P7 Guards: LiveRoles refuses a1_format None, "other" and "compact" (decided 2026-09-15: with_reasoning);
-   ReasoningOffClient refuses max_retries != 0.
+   ReasoningOffClient refuses max_retries != 0; an A1 generation without an A1Input (one-call A1) raises
+   before any request (added 2026-09-15).
 P8 a The A1 candidates are the ones the budget measured: the five trial decisions rendered by
      roles.a1_decision_block give per-decision tokens and 5-decision window totals equal to a1_window in
      results/budget/budget_20260914_120638.json.
@@ -157,7 +170,7 @@ BUDGET = RESULTS / "budget" / "budget_20260914_120638.json"
 TRIAL = RESULTS / "format_trial" / "trial_20260914_110451"
 JSON_MODE_OVERHEAD = 26
 HOSTS = ("fireworks", "deepinfra")
-TOKEN_RE = re.compile(r"〔(TRACE|SRC|FROM) (A[012]) (\d{4}-\d{2}-\d{2})〕")
+TOKEN_RE = re.compile(r"〔(TRACE|SRC|FROM|REFL) (A[012]) (\d{4}-\d{2}-\d{2})〕")
 VERDICT_WORDS = ("正確", "錯誤", "答對", "答錯", "correct", "incorrect", "wrong")
 FAULTS = {  # (arm, j, role) -> {attempt: kind}; "all" covers every attempt
     ("A2", 7, "gen"): {"all": "incomplete"},
@@ -169,8 +182,10 @@ FAULTS = {  # (arm, j, role) -> {attempt: kind}; "all" covers every attempt
     ("A2", 20, "reflect"): {1: "not_json"},
     ("A2", 25, "curate"): {"all": "no_reasoning"},
     ("A2", 28, "curate"): {1: "not_json"},
+    ("A1", 20, "a1reflect"): {"all": "not_json"},
+    ("A1", 22, "a1reflect"): {1: "no_reflection"},
 }
-ROLE_OF = {"generator": "gen", "reflector": "reflect", "curator": "curate"}
+ROLE_OF = {"generator": "gen", "reflector": "reflect", "curator": "curate", "a1_reflector": "a1reflect"}
 CHECKS = []
 
 
@@ -199,6 +214,7 @@ GEN_RE = template_regex(GENERATOR_PROMPT, ["playbook", "reflection", "question",
 REF_RE = template_regex(REFLECTOR_PROMPT, ["question", "trace", "predicted", "ground_truth", "env", "bullets"])
 CUR_RE = template_regex(CURATOR_PROMPT, ["token_budget", "current_step", "total_samples", "playbook_stats",
                                          "recent_reflection", "current_playbook", "question_context"])
+A1R_RE = template_regex(roles.A1_REFLECTION_PROMPT, ["n", "question", "window", "words", "zh_chars"])
 
 
 def split(regex, prompt):
@@ -264,9 +280,18 @@ class FakeLLM:
             content = self.generation(prompt, label, arm, dash, kind)
         elif role == "reflector":
             content = self.reflection(prompt, kind)
+        elif role == ap.A1_REFLECTION_ROLE:
+            content = self.a1_reflection(prompt, kind, arm, dash)
         else:
             content = self.curation(prompt, kind)
         return self.answer(request, entry, content)
+
+    def a1_reflection(self, prompt, kind, arm, dash):
+        if kind == "not_json":
+            return "offline fake: this is not json"
+        split(A1R_RE, prompt)
+        text = f"〔REFL {arm} {dash}〕 " + self.pad(int(self.sizes["a1_reflection"]))
+        return json.dumps({"notes": text} if kind == "no_reflection" else {"reflection": text}, ensure_ascii=False)
 
     def generation(self, prompt, label, arm, dash, kind):
         s = split(GEN_RE, prompt)
@@ -400,7 +425,11 @@ def setup(args, out):
                               encoding="utf-8"))["body"]
     mid = env.budget["scenarios"]["mid"]
     env.fake = FakeLLM(tok, envelope, trial_reasonings,
-                       {"reflector": mid["reflector_completion"], "curator": mid["curator_completion"], "growth": mid["growth"]})
+                       {"reflector": mid["reflector_completion"], "curator": mid["curator_completion"], "growth": mid["growth"],
+                        "a1_reflection": ap.A1_REFLECTION_CAP_TOKENS})
+    env.a1_template_tokens = tok(roles.A1_REFLECTION_PROMPT.format(
+        n=rp.WINDOW_K, question=QUESTION, window="", words=ap.A1_REFLECTION_CAP_WORDS,
+        zh_chars=ap.A1_REFLECTION_CAP_ZH_CHARS)) + JSON_MODE_OVERHEAD
     for cond, c in env.cond.items():
         for (arm, j, role), plan in FAULTS.items():
             env.fake.faults[(cond, arm, c["dates"][j], role)] = plan
@@ -424,14 +453,15 @@ def run_label(env, cond, fmt, out):
     print(f"\n== replay {label}: {len(c['dates'])} decision dates", flush=True)
     res = rp.run_replay(c["cal"], c["dates"], c["U"], live.generate, live.reflect, live.curate,
                         rp.OutcomeStore(c["outcomes"], c["cal"]), rp.ARM_ORDER_SEED, memories=mem,
-                        curator_check=live.curator_check)
+                        curator_check=live.curator_check, reflect_a1=live.a1_reflect,
+                        a1_reflection_check=live.a1_reflection_check)
     written = {}
     for arm in rp.ARMS:
         frames = [ap.score_rows(d, res.outcomes[(arm, d)]) for d in c["dates"]]
         scores = pd.concat([f for f in frames if len(f)], ignore_index=True)
         written[arm] = records.write_run(
             ldir / "records" / arm, c["pnl"], scores, arm=f"offline:{arm}", llm_meta=res.meta_rows[arm],
-            extra={**rp.manifest_fields(), "fake_llm": True, "condition": cond,
+            extra={**rp.manifest_fields("offline_check"), "fake_llm": True, "condition": cond,
                    "a1_window_format": fmt if arm == "A1" else None,
                    "provider_log": os.environ["ACE_PROVIDER_LOG"]})
     mem["A2"].bullet_table().to_parquet(ldir / "records" / "A2" / "playbook_bullets.parquet", index=False)
@@ -487,52 +517,81 @@ def verify(env, run):
         return not bad, bad[:5]
     check(label, "P1a A0 prompt: empty playbook, (empty) reflection, QUESTION, exact context, no memory token", p1a)
 
+    a1_meta = {pd.Timestamp(r["decision_date"]): r for r in res.meta_rows["A1"]}
+
+    def a1_reflection_text(d):
+        r = a1_meta[pd.Timestamp(d)]
+        if r.get("a1_reflection_status") != "ok":
+            return None
+        return json.loads(json.loads(r["aux_attempts_json"])[-1]["response"])["reflection"]
+
     def p1b():
-        bad = []
+        bad, n_with = [], 0
         for e in gen:
             if e["arm"] != "A1":
                 continue
-            d, j = e["date"], idx[e["date"]]
+            d = e["date"]
             s = split(GEN_RE, e["prompt"])
-            if not (s["playbook"] == roles.EMPTY_PLAYBOOK and s["reflection"] == "(empty)" and s["question"] == QUESTION
-                    and s["context"].startswith(base(d))):
-                bad.append((e["call_id"], "slots"))
-                continue
-            rest = s["context"][len(base(d)):]
+            text = a1_reflection_text(d)
+            n_with += text is not None
+            want_toks = [("REFL", "A1", str(d.date()))] if text is not None else []
+            if not (s["playbook"] == roles.EMPTY_PLAYBOOK and s["question"] == QUESTION and s["context"] == base(d)
+                    and s["reflection"] == (text if text is not None else "(empty)")
+                    and TOKEN_RE.findall(e["prompt"]) == want_toks):
+                bad.append((e["call_id"], TOKEN_RE.findall(e["prompt"])[:3]))
+        return not bad and n_with > 0, bad[:5]
+    check(label, "P1b A1 Generator: exact context, its own date's reflection text or (empty), nothing else", p1b)
+
+    a1r = [e for e in reqs if e["role"] == ap.A1_REFLECTION_ROLE]
+
+    def p1f():
+        bad = []
+        first_a1_gen = {e["date"]: e["i"] for e in gen if e["arm"] == "A1" and e["attempt"] == 1}
+        by_date = {}
+        for e in a1r:
+            by_date.setdefault(e["date"], []).append(e)
+        for j, d in enumerate(dates):
             kept, _ = ap.window_indices(j, a1_void)
             expected = [dates[i] for i in kept]
-            toks = TOKEN_RE.findall(e["prompt"])
-            want_toks = sorted(("TRACE", "A1", str(x.date())) for x in expected) if fmt == "with_reasoning" else []
-            if sorted(toks) != want_toks:
-                bad.append((e["call_id"], "tokens", toks[:3]))
+            got = by_date.get(d, [])
+            if bool(expected) != bool(got):
+                bad.append((str(d.date()), "presence", len(expected), len(got)))
                 continue
-            if not expected:
-                if rest != "":
-                    bad.append((e["call_id"], "window without maturity"))
-                continue
-            if not rest.startswith("\n\n" + roles.A1_WINDOW_HEADER):
-                bad.append((e["call_id"], "header"))
-                continue
-            lines = rest.split("\n")
-            heads = [(k, re.match(r"^決策日 (\d{4}-\d{2}-\d{2})（h=10 於 (\d{4}-\d{2}-\d{2}) 到期）$", ln))
-                     for k, ln in enumerate(lines)]
-            heads = [(k, m) for k, m in heads if m]
-            if [pd.Timestamp(m.group(1)) for _, m in heads] != expected:
-                bad.append((e["call_id"], "dates", [m.group(1) for _, m in heads]))
-                continue
-            for (k, m), x in zip(heads, expected):
-                if pd.Timestamp(m.group(2)) != cal.shift(x, rp.DELAY):
-                    bad.append((e["call_id"], "mature", m.group(2)))
-                mem_ids = members(x)
-                body_lines = lines[k + 2:k + 2 + len(mem_ids)]
-                sc = out_of("A1", x)["scores"]
-                for sid, ln in zip(mem_ids, body_lines):
-                    parts = ln.split(" ")
-                    if parts[0] != sid or parts[-2] != f"{sc[sid]:+.2f}" or parts[-1] != alpha_text(al(x, sid)):
-                        bad.append((e["call_id"], "line", ln))
-                        break
-        return not bad, bad[:5]
-    check(label, "P1b A1 prompt: only A1's own matured, non-void decisions, own scores, panel alpha", p1b)
+            for e in got:
+                if e["i"] > first_a1_gen[d]:
+                    bad.append((e["call_id"], "after generation"))
+                m = A1R_RE.match(e["prompt"])
+                if not m or int(m.group("n")) != len(expected) or m.group("question") != QUESTION \
+                        or int(m.group("words")) != ap.A1_REFLECTION_CAP_WORDS \
+                        or int(m.group("zh_chars")) != ap.A1_REFLECTION_CAP_ZH_CHARS:
+                    bad.append((e["call_id"], "template"))
+                    continue
+                if sorted(TOKEN_RE.findall(e["prompt"])) != sorted(("TRACE", "A1", str(x.date())) for x in expected):
+                    bad.append((e["call_id"], "tokens"))
+                    continue
+                bad += [(e["call_id"],) + b for b in window_problems(m.group("window").split("\n"), expected)]
+        return not bad and len(a1r) > 0, bad[:5]
+
+    def window_problems(lines, expected):
+        bad = []
+        heads = [(k, re.match(r"^決策日 (\d{4}-\d{2}-\d{2})（h=10 於 (\d{4}-\d{2}-\d{2}) 到期）$", ln))
+                 for k, ln in enumerate(lines)]
+        heads = [(k, m) for k, m in heads if m]
+        if [pd.Timestamp(m.group(1)) for _, m in heads] != expected:
+            return [("dates", [m.group(1) for _, m in heads])]
+        for (k, m), x in zip(heads, expected):
+            if pd.Timestamp(m.group(2)) != cal.shift(x, rp.DELAY):
+                bad.append(("mature", m.group(2)))
+            mem_ids = members(x)
+            body_lines = lines[k + 2:k + 2 + len(mem_ids)]
+            sc = out_of("A1", x)["scores"]
+            for sid, ln in zip(mem_ids, body_lines):
+                parts = ln.split(" ")
+                if parts[0] != sid or parts[-2] != f"{sc[sid]:+.2f}" or parts[-1] != alpha_text(al(x, sid)):
+                    bad.append(("line", ln))
+                    break
+        return bad
+    check(label, "P1f A1 reflection: on window dates only, before generation, own matured decisions, scores, alpha", p1f)
 
     def text_at(t):
         done = [r for r in commits if pd.Timestamp(r["matured_on"]) <= t]
@@ -717,6 +776,16 @@ def verify(env, run):
     check(label, "P4h Curator fails for j=25: no bullet, only the Reflector's helpful counts moved", p4h)
     check(label, "P4i Curator retry for j=28: ok after 2", lambda: (
         len(reqs_for("curator", "A2", D(28))) == 2 and harvest[("A2", D(28))]["curator_status"] == "ok", harvest[("A2", D(28))]))
+    check(label, "P4j A1 reflection fails x3 at j=20: failed, Generator gets (empty), decision not void", lambda: (
+        a1_meta[D(20)]["a1_reflection_status"] == "failed" and a1_meta[D(20)]["a1_reflection_attempts"] == 3
+        and len(reqs_for(ap.A1_REFLECTION_ROLE, "A1", D(20))) == 3
+        and split(GEN_RE, first_gen[("A1", D(20))]["prompt"])["reflection"] == "(empty)"
+        and not out_of("A1", D(20))["voided"], a1_meta[D(20)].get("a1_reflection_status")))
+    check(label, "P4k A1 reflection without its key once at j=22: ok after 2, text reaches the Generator", lambda: (
+        a1_meta[D(22)]["a1_reflection_status"] == "ok" and a1_meta[D(22)]["a1_reflection_attempts"] == 2
+        and len(reqs_for(ap.A1_REFLECTION_ROLE, "A1", D(22))) == 2
+        and f"〔REFL A1 {D(22).date()}〕" in split(GEN_RE, first_gen[("A1", D(22))]["prompt"])["reflection"],
+        a1_meta[D(22)].get("a1_reflection_status")))
 
     # P5
     def p5a():
@@ -773,7 +842,7 @@ def verify(env, run):
                     bad.append((arm, r.call_id, "cost on a call with no answer"))
             total_rows += float(calls["cost_usd"].sum())
             md = m.set_index("decision_date")
-            for col, rs in (("cost_usd", ("generator",)), ("aux_cost_usd", ("reflector", "curator"))):
+            for col, rs in (("cost_usd", ("generator",)), ("aux_cost_usd", ("reflector", "curator", ap.A1_REFLECTION_ROLE))):
                 sums = calls[calls["role"].isin(rs)].groupby("decision_date")["cost_usd"].sum(min_count=1)
                 for d, v in md[col].items():
                     s = sums.get(d, np.nan)
@@ -872,11 +941,14 @@ def token_rows(env, run, reqs):
                 row["estimate_mid"] = a0[j]
             elif e["arm"] == "A1":
                 k = min(rp.WINDOW_K, max(0, j - rp.DELAY + 1))
-                row["estimate_mid"] = a0[j] + (k * mid["a1_per_decision"] + W["header"] if k else 0)
-                row["estimate_high"] = a0[j] + (k * high["a1_per_decision"] + W["header"] if k else 0)
-                row["window_tokens"] = e["prompt_tokens_local"] - a0[j]
+                row["estimate_mid"] = a0[j] + (ap.A1_REFLECTION_CAP_TOKENS if k else 0)
+                row["reflection_slot_tokens"] = e["prompt_tokens_local"] - a0[j]
             else:
                 row["estimate_mid"] = a0[j] + mid["growth"] * max(0, j - rp.DELAY + 1)
+        elif e["role"] == ap.A1_REFLECTION_ROLE:
+            row["index"] = j
+            k = min(rp.WINDOW_K, max(0, j - rp.DELAY + 1))
+            row["estimate_mid"] = env.a1_template_tokens + k * W["per_decision_with_reasoning"]["median"]
         else:
             h = j + rp.DELAY
             m = h - rp.DELAY + 1
@@ -957,16 +1029,19 @@ def a1_candidates(env, out):
         label = f"sample_{fmt}"
         live = roles.LiveRoles(env.client, env.contexts, env.names, env.null, dates, fmt, sample_dir / "llm_logs",
                                roles.AcePlaybook(), label)
-        live.generate("A1", target, tuple(slots), 1)
-        e = [x for x in env.fake.log if x["label"] == label][-1]
-        s = split(GEN_RE, e["prompt"])
-        window = s["context"][len(env.contexts.get(target).context):].lstrip("\n")
-        (sample_dir / f"prompt_A1_{fmt}_{target.date()}.txt").write_text(e["prompt"], encoding="utf-8")
+        a1r = live.a1_reflect(target, tuple(slots), 1)
+        live.generate("A1", target, rp.A1Input(tuple(slots), json.loads(a1r["response"])["reflection"]), 1)
+        er = [x for x in env.fake.log if x["label"] == label and x["role"] == ap.A1_REFLECTION_ROLE][-1]
+        eg = [x for x in env.fake.log if x["label"] == label and x["role"] == "generator"][-1]
+        window = split(A1R_RE, er["prompt"])["window"]
+        (sample_dir / f"prompt_A1reflect_{fmt}_{target.date()}.txt").write_text(er["prompt"], encoding="utf-8")
+        (sample_dir / f"prompt_A1generate_{fmt}_{target.date()}.txt").write_text(eg["prompt"], encoding="utf-8")
         (sample_dir / f"window_A1_{fmt}_{target.date()}.txt").write_text(window, encoding="utf-8")
         (sample_dir / f"decision_block_A1_{fmt}_{slots[0].decision_date.date()}.txt").write_text(
             roles.a1_decision_block(slots[0], env.names, fmt), encoding="utf-8")
         info[fmt] = {"decision_date": str(target.date()), "window_decisions": [str(s.decision_date.date()) for s in slots],
-                     "prompt_tokens_with_json_overhead": e["prompt_tokens_local"],
+                     "reflection_prompt_tokens_with_json_overhead": er["prompt_tokens_local"],
+                     "generation_prompt_tokens_with_json_overhead": eg["prompt_tokens_local"],
                      "window_tokens": env.ntok(window),
                      "a0_prompt_tokens_same_date": env.ntok(GENERATOR_PROMPT.format(
                          roles.EMPTY_PLAYBOOK, "(empty)", QUESTION, env.contexts.get(target).context)) + JSON_MODE_OVERHEAD,
@@ -1021,6 +1096,13 @@ def main():
                 refused.append(False)
             except ValueError:
                 refused.append(True)
+        try:
+            roles.LiveRoles(env.client, env.contexts, env.names, env.null, env.cond[args.conditions[0]]["dates"],
+                            roles.A1_WINDOW_FORMAT, out / "guard", roles.AcePlaybook(), "guard").generate(
+                "A1", env.cond[args.conditions[0]]["dates"][0], (), 1)
+            refused.append(False)
+        except TypeError:
+            refused.append(True)
         try:
             roles.ReasoningOffClient(utils.initialize_clients("clinepass")[0])
             refused.append(False)

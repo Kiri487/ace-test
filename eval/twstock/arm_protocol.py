@@ -52,12 +52,46 @@ A1 rolling window, decided by the user 2026-09-15 (settled; not to be reopened)
     Format A1_WINDOW_FORMAT = "with_reasoning": each matured decision in the window carries every
     member's score, its realized h=10 alpha and the reasoning the generation gave at the time -
     about 2,455 tokens per decision (mean 2,490) and 12,466 for a full window of 5
-    (results/budget/budget_20260914_120638.json, v9.3 §5.2.1). One call per decision date, as the
-    driver is built: the window rides in the Generator's context.
-    Reason: information parity with A2. A1 is the baseline A2 has to beat; giving it outcomes
-    without the reasoning would weaken it before beating it and make an A2 win unconvincing.
-    A2's playbook is itself a product of reasoning, so the two memories must sit at the same
-    information level. The cost pushes the total toward the high scenario; the budget carries it.
+    (results/budget/budget_20260914_120638.json, v9.3 §5.2.1).
+    Reason for the format: information parity with A2. A1 is the baseline A2 has to beat; giving it
+    outcomes without the reasoning would weaken it before beating it and make an A2 win
+    unconvincing. A2's playbook is itself a product of reasoning, so the two memories must sit at
+    the same information level. The cost pushes the total toward the high scenario.
+
+    Two calls per decision date, A1_CALLS_PER_DECISION = 2 (the user's second ruling of 2026-09-15;
+    it replaces a one-call reading that had been taken without asking):
+      1. reflection  roles.A1_REFLECTION_PROMPT over the window (the non-void decisions among the last
+                     5 maturity slots, with reasoning) -> JSON {"reflection": text}
+      2. generation  the Generator with that text in its reflection slot; the context is the date's
+                     own input only, the raw window is not passed again
+    Reason: A1 stands for CryptoTrade §2.4's Reflection Agent, a separate reflection call that reviews
+    the matured decisions and their returns and writes a reflection the decision then uses. Folded
+    into one Generator call, A1 would no longer be rolling-window reflection, which RQ2's wording and
+    the §4.3 literature mapping name. And A2 spends two extra calls (Reflector, Curator) digesting its
+    experience; making A1 digest the raw window inside its single decision call would weaken the
+    baseline - the same reason as for the format.
+    Before the first maturity (or when every slot is void) the window is empty: no reflection call,
+    the Generator gets "(empty)", one call that date.
+    The reflection call follows rule 5's retries. If it still fails (A1_REFLECTION_FAILURE_RULE) the
+    date is still generated, with "(empty)" in the reflection slot, and the failure is counted apart
+    (a1_reflection_status = failed) - the analogue of A2 generating on its last playbook when its
+    Reflector fails. Recorded as this code's rule; the user has not ruled on it yet.
+    Length: A1_REFLECTION_CAP_TOKENS = 1,300, stated in the prompt as about 700 English words or about
+    1,500 Chinese characters (1.86 tokens per English word, measured on the five non-reasoning trial
+    reasonings; 0.84 per Chinese character, measured on the 2026-05-19 headlines; local
+    DeepSeek-V4-Flash tokenizer). Basis, set before any A1 call: parity with A2's Reflector output,
+    whose mid budget estimate is 1,268 tokens (FiNER DeepSeek Reflector median 416 x the 3.05
+    non-reasoning ratio), rounded up. It is an instruction, not max_tokens: a small max_tokens made
+    every ClinePass call a 500 (2026-09-03) and a truncated JSON answer is unusable. Each reflection's
+    completion tokens are recorded and an overrun is flagged (a1_reflection_over_cap), never cut.
+
+A0 pilot, decided by the user 2026-09-15
+    A0 run alone does not meet §5.2.0 (arms interleaved on the same date so the host mix cannot line
+    up with the arm), so it can never be the thesis's A0. The first A0 run is a gate pilot only
+    (PILOT_A0): one seed, the post-cutoff condition (85 dates), judged by the criteria file committed
+    before it runs. The real A0 is rerun interleaved with A1 and A2; no pilot number enters a result
+    table. Its manifest says run_kind = "pilot" and usable_as_result = false, and
+    records.require_result_run refuses it.
 
 Cost (v9.3 §6.4): every attempt keeps the usage.cost the gateway metered with its answer;
 meta_row sums it per date (cost_usd for generation, aux_cost_usd for Reflector + Curator) and
@@ -79,11 +113,29 @@ FEEDBACK_CONTENT = (    # §10.1 (一): what the Reflector reads; continuous, no
 DELAY = 11             # h=10 feedback of decision i is usable at decision date i+11 (v9 §5.1)
 WINDOW_K = 5            # A1: the last 5 matured decisions
 A1_WINDOW_FORMAT = "with_reasoning"     # decided 2026-09-15, see the docstring
-A1_CALLS_PER_DECISION = 1               # the window rides in the Generator's context
+A1_CALLS_PER_DECISION = 2               # reflection call, then generation (second ruling, 2026-09-15)
 A1_WINDOW_FORMAT_REASON = (
     "information parity with A2: A1 is the baseline A2 must beat, and outcomes without the reasoning "
     "would weaken it before beating it; A2's playbook is itself a product of reasoning, so both "
     "memories sit at the same information level")
+A1_CALLS_REASON = (
+    "A1 stands for CryptoTrade §2.4's Reflection Agent, a separate reflection call; folded into the "
+    "Generator it would stop being rolling-window reflection (RQ2, §4.3). A2 digests experience in two "
+    "extra calls, so a single call for A1 would weaken the baseline")
+A1_REFLECTION_ROLE = "a1_reflector"
+A1_REFLECTION_CAP_TOKENS = 1300
+A1_REFLECTION_CAP_WORDS = 700           # 1,300 / 1.86 tokens per English word
+A1_REFLECTION_CAP_ZH_CHARS = 1500       # 1,300 / 0.84 tokens per Chinese character, rounded down
+A1_REFLECTION_CAP_BASIS = (
+    "parity with A2's Reflector output: budget mid estimate 1,268 tokens (FiNER DeepSeek Reflector median "
+    "416 x 3.05 non-reasoning ratio), rounded up; words and characters from measured 1.86 tokens per "
+    "English word and 0.84 per Chinese character; an instruction, not max_tokens; overruns flagged, not cut")
+A1_REFLECTION_FAILURE_RULE = "generate_with_empty_reflection"   # the code's rule; not yet ruled on by the user
+RUN_KINDS = ("offline_check", "pilot", "main")
+PILOT_A0 = {"run_kind": "pilot", "arm": "A0", "condition": "post", "seeds": 1, "usable_as_result": False,
+            "purpose": "gate: do headlines carry enough signal to make the A1/A2 comparison meaningful",
+            "why_not_a_result": "A0 alone is not interleaved with A1/A2 on the same dates (v9.3 §5.2.0); the "
+                                "real A0 is rerun interleaved"}
 ACCEPTED_FORMS = ("object", "json_string")
 # order in which a failure is named when several apply; every applicable kind is kept too
 FAILURE_ORDER = ("call_error", "json", "final_answer_form", "duplicate_key", "out_of_universe_key", "incomplete")
@@ -323,6 +375,29 @@ def process_maturity(matured_date, matured_voided, reflect_call, curate_call,
             "reflector": r, "curator": c}
 
 
+def a1_reflection_check(response):
+    """Usable A1 reflection: a JSON object whose "reflection" is a non-empty string."""
+    kind = json_object_check(response)
+    if kind is not None:
+        return kind
+    text = json.loads(response).get("reflection")
+    return None if isinstance(text, str) and text.strip() else "a1_reflection_missing"
+
+
+def process_a1_reflection(slots, reflect_call, check=a1_reflection_check, cap_tokens=A1_REFLECTION_CAP_TOKENS):
+    """A1 step 1 on one decision date. No usable slot: no call. Otherwise one reflection under rule 5;
+    if it fails, the Generator's reflection slot stays "(empty)" (A1_REFLECTION_FAILURE_RULE)."""
+    if not slots:
+        return {"status": "not_run", "reflection": None, "attempts": [], "n_attempts": 0, "n_retries": 0,
+                "completion_tokens": None, "over_cap": None}
+    r = run_aux_call(reflect_call, A1_REFLECTION_ROLE, check)
+    ok = r["status"] == "ok"
+    tokens = r["attempts"][-1].get("completion_tokens") if ok else None
+    return {"status": r["status"], "reflection": json.loads(r["response"])["reflection"] if ok else None,
+            "attempts": r["attempts"], "n_attempts": r["n_attempts"], "n_retries": r["n_retries"],
+            "completion_tokens": tokens, "over_cap": None if tokens is None else bool(tokens > cap_tokens)}
+
+
 def score_rows(decision_date, outcome):
     """Score rows for records.write_run: the whole universe, or nothing for a void date."""
     if outcome["voided"]:
@@ -342,10 +417,11 @@ def total_cost(attempts):
     return float(sum(vals)) if vals else None
 
 
-def meta_row(decision_date, outcome, maturity=None, window=None):
+def meta_row(decision_date, outcome, maturity=None, window=None, a1_reflection=None):
     """One llm_meta row for records.write_run.
 
     maturity: process_maturity() result (A2). window: (kept_dates, skipped_void_dates) (A1).
+    a1_reflection: process_a1_reflection() result (A1).
     """
     atts = outcome["attempts"]
 
@@ -390,6 +466,16 @@ def meta_row(decision_date, outcome, maturity=None, window=None):
         row.update({
             "window_decision_dates": json.dumps([str(pd.Timestamp(d).date()) for d in kept]),
             "window_skipped_void": len(skipped),
+        })
+    if a1_reflection is not None:
+        row.update({
+            "a1_reflection_status": a1_reflection["status"],
+            "a1_reflection_attempts": a1_reflection["n_attempts"],
+            "a1_reflection_retries": a1_reflection["n_retries"],
+            "a1_reflection_tokens": a1_reflection["completion_tokens"],
+            "a1_reflection_over_cap": a1_reflection["over_cap"],
+            "aux_cost_usd": total_cost(a1_reflection["attempts"]),
+            "aux_attempts_json": json.dumps(a1_reflection["attempts"], ensure_ascii=False, default=str),
         })
     return row
 
@@ -446,5 +532,11 @@ def learning_summary(meta):
         if "window_skipped_void" in g and g["window_skipped_void"].notna().any():
             w = g["window_skipped_void"].fillna(0)
             row.update({"window_slots_skipped_void": int(w.sum()), "dates_with_short_window": int((w > 0).sum())})
+        if "a1_reflection_status" in g and g["a1_reflection_status"].notna().any():
+            st = g["a1_reflection_status"]
+            row.update({"a1_reflection_ok": int((st == "ok").sum()), "a1_reflection_failed": int((st == "failed").sum()),
+                        "a1_reflection_not_run": int((st == "not_run").sum()),
+                        "a1_reflection_retries": int(g["a1_reflection_retries"].fillna(0).sum()),
+                        "a1_reflection_over_cap": int(g["a1_reflection_over_cap"].fillna(False).astype(bool).sum())})
         rows.append(row)
     return pd.DataFrame(rows)

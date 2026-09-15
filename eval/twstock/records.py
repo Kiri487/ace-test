@@ -19,6 +19,11 @@ A void date has no score at all; a date that is not void has every member scored
 Schema 4 adds the cost of every call (v9.3 §6.4 "每次 LLM 呼叫的 token 數與成本"): cost_usd and
 aux_cost_usd per date, and llm_calls.parquet with tokens, latency, usage.cost and the provider
 routing of each attempt. Before schema 4 cost sat only in the provider log and inside attempts_json.
+
+Schema 5 (2026-09-15): A1 is two calls - the reflection call's status, attempts, tokens and overrun
+flag per date (its attempts in aux_attempts_json, role a1_reflector) - and every LLM run's manifest
+carries run_kind (offline_check | pilot | main) and usable_as_result. require_result_run() is the
+gate any result table must pass: a pilot or offline run is refused.
 """
 
 import datetime as _dt
@@ -29,11 +34,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import ic
-from .arm_protocol import attempt_cost
+from . import data_snapshot, ic
+from .arm_protocol import RUN_KINDS, attempt_cost
 from .panel import HORIZONS, UNIVERSE_SIZE
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COST_SOURCE = ("usage.cost of each answered call as the gateway metered it (ClinePass quota metering at the "
                "reference price, not cash); a call that got no answer carries none - its HTTP status is in the "
@@ -69,6 +74,12 @@ LLM_FIELDS = {
     # A1 window
     "window_decision_dates": "string",
     "window_skipped_void": "Int64",
+    # A1 reflection call (schema 5); its attempts go to aux_attempts_json / aux_cost_usd
+    "a1_reflection_status": "string",     # ok | failed | not_run (no usable slot in the window)
+    "a1_reflection_attempts": "Int64",
+    "a1_reflection_retries": "Int64",
+    "a1_reflection_tokens": "Int64",      # completion tokens of the usable reflection
+    "a1_reflection_over_cap": "boolean",  # above arm_protocol.A1_REFLECTION_CAP_TOKENS; flagged, not cut
 }
 
 # <run_dir>/llm_calls.parquet: one row per request attempt, unpacked from attempts_json and
@@ -210,6 +221,26 @@ def _check_learning_fields(meta):
         raise ValueError(f"Curator recorded after a failed Reflector: {list(meta.loc[curated_after_fail, 'decision_date'])[:5]}")
 
 
+def _check_a1_reflection(meta):
+    """A reflection call is attempted exactly on the dates whose window holds a usable slot."""
+    st = meta["a1_reflection_status"]
+    known = st.notna()
+    bad = meta.loc[known & ~st.isin(["ok", "failed", "not_run"]), "decision_date"]
+    if len(bad):
+        raise ValueError(f"unknown a1_reflection_status on {list(bad)[:5]}")
+    empty = meta["window_decision_dates"].map(lambda v: v is None or pd.isna(v) or json.loads(v) == [])
+    wrong = known & ((st == "not_run") != empty)
+    if wrong.any():
+        raise ValueError(f"a1_reflection_status disagrees with the window on {list(meta.loc[wrong, 'decision_date'])[:5]}")
+
+
+def require_result_run(manifest):
+    """Gate for anything that builds a result table: only run_kind "main" may enter one."""
+    if manifest.get("run_kind") != "main" or manifest.get("usable_as_result") is not True:
+        raise ValueError(f"run_kind {manifest.get('run_kind')!r} is not a result run (pilot and offline runs never are)")
+    return manifest
+
+
 def _fill_llm_meta(meta, llm_meta):
     """Copy per-date LLM fields onto meta and enforce the protocol against the scores."""
     lm = pd.DataFrame(llm_meta).copy()
@@ -239,6 +270,8 @@ def _fill_llm_meta(meta, llm_meta):
             raise ValueError(f"dates that are not void lack scores for some members: {list(bad_full)[:5]}")
     if "maturity_status" in lm.columns:
         _check_learning_fields(meta)
+    if "a1_reflection_status" in lm.columns:
+        _check_a1_reflection(meta)
     return meta
 
 
@@ -249,6 +282,8 @@ def write_run(run_dir, panel, scores, arm, extra=None, horizons=HORIZONS, llm_me
     None for the known-answer factors, whose LLM fields stay null.
     """
     run_dir = Path(run_dir)
+    if llm_meta is not None and (extra or {}).get("run_kind") not in RUN_KINDS:
+        raise ValueError(f"an LLM run's manifest needs run_kind in {RUN_KINDS}, got {(extra or {}).get('run_kind')!r}")
     run_dir.mkdir(parents=True, exist_ok=True)
     keys = ["decision_date", "stock_id"]
 
@@ -314,6 +349,13 @@ def write_run(run_dir, panel, scores, arm, extra=None, horizons=HORIZONS, llm_me
         manifest["llm_calls"] = int(len(calls))
         manifest["cost_usd_by_role"] = {k: (None if pd.isna(v) else float(v)) for k, v in by_role.items()}
         manifest["cost_source"] = COST_SOURCE
+        manifest["usable_as_result"] = manifest["run_kind"] == "main"
+        manifest["data_snapshot"] = data_snapshot.provenance()
+        manifest["feedback_null"] = data_snapshot.FEEDBACK_NULL
+        if meta["a1_reflection_status"].notna().any():
+            st = meta["a1_reflection_status"]
+            manifest["a1_reflections"] = {k: int((st == k).sum()) for k in ("ok", "failed", "not_run")}
+            manifest["a1_reflections"]["over_cap"] = int(meta["a1_reflection_over_cap"].fillna(False).astype(bool).sum())
         if meta["voided"].notna().any():
             manifest["voided_decision_points"] = int(meta["voided"].fillna(False).astype(bool).sum())
         if meta["maturity_status"].notna().any():

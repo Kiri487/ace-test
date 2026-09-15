@@ -16,18 +16,21 @@ Reflector and Curator output sizes and playbook growth from the earlier ACE runs
 Assumed, each with a low / mid / high value printed next to the result: the A2 playbook
 growth per curator call, how much longer Reflector/Curator output gets in non-reasoning
 mode, the share of the playbook passed as "bullets used", and a retry allowance.
-The A1 window is no longer a scenario variable: its format is decided (2026-09-15,
-arm_protocol.A1_WINDOW_FORMAT = "with_reasoning", one call per date), so every scenario uses
-the measured per-decision median with reasoning (2,455 tokens). The compact and two-call
-variants are gone from the table.
+The A1 window is not a scenario variable: its format is decided (2026-09-15,
+arm_protocol.A1_WINDOW_FORMAT = "with_reasoning"), so every scenario uses the measured
+per-decision median with reasoning (2,455 tokens). A1 is two calls (A1_CALLS_PER_DECISION = 2):
+the reflection's output length is the one A1 assumption - low / mid / high = 0.5 / 1.0 / 1.5 x
+A1_REFLECTION_CAP_TOKENS (1,300), the cap being an instruction that can be overrun.
+Also printed: the A0 gate pilot (one seed, post-cutoff only), outside the 18-run matrix.
 
-Arm protocol assumed (arm-interleaving-protocol): A0 one generation per date; A1 one
-generation per date whose context carries the last 5 matured decisions with their reasoning;
+Arm protocol assumed (arm-interleaving-protocol): A0 one generation per date; A1, once a decision
+has matured, one reflection call over the template plus the window of up to 5 matured decisions
+with reasoning, then one generation carrying the reflection (before that, generation only);
 A2 one generation per date plus, from the 12th date on, one Reflector and one Curator
 call for the decision that matured - no regeneration, no multi-round refinement.
 Latency = completion tokens x seconds per completion token measured in the trial;
 prefill time is not modelled (the trial prompts were all ~12k, so it cannot be separated).
-So the A1 window changes prompt tokens and cost here, not hours.
+So the A1 window itself changes prompt tokens and cost, not hours; the reflection's output does add hours.
 """
 
 import argparse
@@ -45,11 +48,13 @@ from ace.prompts.curator import CURATOR_PROMPT
 from ace.prompts.generator import GENERATOR_PROMPT
 from ace.prompts.reflector import REFLECTOR_PROMPT
 
-from . import alpha, market, news, panel, records
-from .arm_protocol import A1_CALLS_PER_DECISION, A1_WINDOW_FORMAT, analyse
+from . import alpha, data_snapshot, market, news, panel, records
+from .arm_protocol import (A1_CALLS_PER_DECISION, A1_REFLECTION_CAP_TOKENS, A1_REFLECTION_CAP_WORDS,
+                           A1_REFLECTION_CAP_ZH_CHARS, A1_WINDOW_FORMAT, analyse)
 from .decision_input import build_decision_input
 from .format_trial import QUESTION, company_names, load_tokenizer, render_context
 from .replay import CONDITIONS          # the only place the two phase-one windows are written
+from .roles import A1_REFLECTION_PROMPT
 
 SEEDS = 3
 DELAY = 11                    # h=10 feedback of date i is usable at date i+11 (v9 §5.1)
@@ -74,8 +79,8 @@ CAVEATS = {
         "runs (another task). Every figure that cites p90 or the high scenario carries this limit."),
     "prefill_not_modelled": (
         "Time is completion tokens x seconds per completion token from ~12k-token trial prompts; the extra "
-        "prefill of longer A1 and A2 prompts is not modelled - so A1's reasoning window (~12.5k tokens once "
-        "full) raises prompt tokens and cost in this table but not its hours."),
+        "prefill of longer A1 and A2 prompts is not modelled - so A1's reflection prompt (~12.5k-token window "
+        "once full) raises prompt tokens and cost in this table but not its hours; only its output adds hours."),
 }
 HIGH_LIMIT = "p90/max over 5 trial calls; not a tail estimate (see caveats)"
 TABLE_DEPENDS_ON = "A2 ~3 calls/decision = v9 §10.1 (二) max_num_rounds=1 (decided); invalid if refinement were restored"
@@ -232,9 +237,12 @@ def arm_runs(p, S, T):
     for j in range(n):
         out["A0"] += call(a0[j], gen_c, spt)
 
-        k = min(WINDOW_K, max(0, j - DELAY + 1))      # A1: one call, window with reasoning in its context
-        window = k * S["a1_per_decision"] + (T["a1_header"] if k else 0)
-        out["A1"] += call(a0[j] + window, gen_c, spt)
+        k = min(WINDOW_K, max(0, j - DELAY + 1))      # A1: reflection over the window, then generation
+        if k:
+            out["A1"] += call(T["a1_reflection_template"] + k * S["a1_per_decision"], S["a1_reflection"], spt)
+            out["A1"] += call(a0[j] + S["a1_reflection"], gen_c, spt)
+        else:
+            out["A1"] += call(a0[j], gen_c, spt)
 
         m = max(0, j - DELAY + 1)          # matured decisions already folded into the playbook at j
         if j >= DELAY:
@@ -274,8 +282,9 @@ def main():
     roles_ds = role_sizes(DEEPSEEK_RUNS, ntok)
     growth = playbook_growth(ntok, tmpl["empty_playbook"])
 
-    if A1_WINDOW_FORMAT != "with_reasoning" or A1_CALLS_PER_DECISION != 1:
-        raise RuntimeError("arm_runs models A1 as one call with the reasoning window; arm_protocol now says otherwise")
+    if A1_WINDOW_FORMAT != "with_reasoning" or A1_CALLS_PER_DECISION != 2:
+        raise RuntimeError("arm_runs models A1 as a reflection over the reasoning window plus a generation; "
+                           "arm_protocol now says otherwise")
     cfg = news.load_config()
     index, _ = news.build(cfg)
     windows = {k: panel.decision_dates(*v) for k, v in CONDITIONS.items()}
@@ -288,17 +297,20 @@ def main():
     gen = trial["completion_tokens"]
     spt = trial["s_per_completion_token"]
     a1_tok = win["per_decision_with_reasoning"]["median"]      # the decided format, in every scenario
+    cap = A1_REFLECTION_CAP_TOKENS    # reflection length: half the cap / the cap / 1.5x (an instruction can be overrun)
 
-    T = {**tmpl, "a1_header": win["header"], "ground_truth": win["ground_truth_block"]["median"]}
+    T = {**tmpl, "a1_header": win["header"], "ground_truth": win["ground_truth_block"]["median"],
+         "a1_reflection_template": ntok(A1_REFLECTION_PROMPT.format(
+             n=WINDOW_K, question=QUESTION, window="", words=A1_REFLECTION_CAP_WORDS, zh_chars=A1_REFLECTION_CAP_ZH_CHARS))}
     scenarios = {
-        "low": {"gen_completion": gen["min"], "s_per_tok": spt["mean"], "a1_per_decision": a1_tok,
+        "low": {"gen_completion": gen["min"], "s_per_tok": spt["mean"], "a1_per_decision": a1_tok, "a1_reflection": 0.5 * cap,
                 "growth": float(g_all.min()), "reflector_completion": rc["median"], "curator_completion": cc["median"],
                 "bullets_used_share": 0.0, "final_answer": trial["final_answer_tokens"]["median"], "retry_factor": 1.00},
-        "mid": {"gen_completion": gen["mean"], "s_per_tok": spt["mean"], "a1_per_decision": a1_tok,
+        "mid": {"gen_completion": gen["mean"], "s_per_tok": spt["mean"], "a1_per_decision": a1_tok, "a1_reflection": 1.0 * cap,
                 "growth": float(ds_growth["tokens_per_curator_call"].median()),
                 "reflector_completion": rc["median"] * ratio["ratio"], "curator_completion": cc["median"] * ratio["ratio"],
                 "bullets_used_share": 0.25, "final_answer": trial["final_answer_tokens"]["median"], "retry_factor": 1.02},
-        "high": {"gen_completion": gen["max"], "s_per_tok": spt["mean"], "a1_per_decision": a1_tok,
+        "high": {"gen_completion": gen["max"], "s_per_tok": spt["mean"], "a1_per_decision": a1_tok, "a1_reflection": 1.5 * cap,
                  "growth": float(g_all.max()),
                  "reflector_completion": rc["p90"] * ratio["ratio"], "curator_completion": cc["p90"] * ratio["ratio"],
                  "bullets_used_share": 0.5, "final_answer": trial["final_answer_tokens"]["median"], "retry_factor": 1.10},
@@ -337,7 +349,7 @@ def main():
         return h, c
     base_h, base_c = total_hours_cost(scenarios["mid"])
     sens = []
-    for key in ("gen_completion", "growth", "reflector_completion", "curator_completion",
+    for key in ("gen_completion", "a1_reflection", "growth", "reflector_completion", "curator_completion",
                 "bullets_used_share", "retry_factor"):
         S = dict(scenarios["mid"])
         S[key] = scenarios["high"][key]
@@ -366,10 +378,15 @@ def main():
         "created_at": _dt.datetime.now().isoformat(timespec="seconds"),
         "git": records.git_state(),
         "conditions": CONDITIONS,
+        "data_snapshot": data_snapshot.provenance(),
         "data_last_dates": panel.data_last_dates(),
         "a1_protocol": {"window_format": A1_WINDOW_FORMAT, "calls_per_decision": A1_CALLS_PER_DECISION,
                         "window_k": WINDOW_K, "per_decision_tokens_used": a1_tok,
-                        "window5_tokens_measured": win["window5_with_reasoning"]},
+                        "window5_tokens_measured": win["window5_with_reasoning"],
+                        "reflection_template_tokens": T["a1_reflection_template"],
+                        "reflection_cap_tokens": A1_REFLECTION_CAP_TOKENS,
+                        "reflection_completion_by_scenario": {sc: S["a1_reflection"] for sc, S in scenarios.items()}},
+        "a0_pilot_one_seed_post": {sc: fmt_row("A0 pilot (1 seed, post)", results[(sc, "post")]["A0"], 1) for sc in scenarios},
         "decision_dates": {k: {"count": int(len(d)), "first": str(d[0].date()), "last": str(d[-1].date())} for k, d in windows.items()},
         "a0_prompt_tokens": {k: dist(p["prompt"]) for k, p in prompts.items()},
         "context_tokens": {k: dist(p["context"]) for k, p in prompts.items()},

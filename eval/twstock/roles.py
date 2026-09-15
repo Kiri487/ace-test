@@ -9,11 +9,13 @@ Generator, every arm (GENERATOR_PROMPT through ace.core.generator.Generator)
   context     the decision date's news and numbers, format_trial.render_context
   reflection  "(empty)" for every arm: refinement is off (MAX_NUM_ROUNDS = 1), nothing is regenerated
   playbook    A0 and A1: the ACE empty playbook. A2: its own playbook text.
-  A1 alone also gets its rolling window, appended to the context slot, in the format decided on
-  2026-09-15: arm_protocol.A1_WINDOW_FORMAT = "with_reasoning" (each matured decision with its
-  scores, realized alpha and the reasoning of the time; reason in arm_protocol's docstring).
-  LiveRoles refuses any other format; the compact renderer remains only to reproduce the budget's
-  775-token measurement.
+  A1 is two calls (arm_protocol.A1_CALLS_PER_DECISION = 2, reasons in arm_protocol's docstring):
+  a1_reflect first sends A1_REFLECTION_PROMPT over its window, in the format decided on 2026-09-15
+  (arm_protocol.A1_WINDOW_FORMAT = "with_reasoning": each matured decision with its scores, realized
+  alpha and the reasoning of the time), and asks for JSON {"reflection": text}; the Generator then
+  gets that text in its reflection slot ("(empty)" when there was no usable slot or the reflection
+  failed) and the date's own context only. LiveRoles refuses any other format and a one-call A1;
+  the compact renderer remains only to reproduce the budget's 775-token measurement.
 
 Reflector, A2 only, once per non-void maturity (REFLECTOR_PROMPT through Reflector.reflect)
   question = QUESTION; reasoning_trace = the decision's full generation; predicted_answer =
@@ -54,6 +56,7 @@ from ace.core.generator import Generator
 from ace.core.reflector import Reflector
 from playbook_utils import (apply_curator_operations, extract_playbook_bullets, get_playbook_stats,
                             parse_playbook_line, update_bullet_counts)
+from llm import timed_llm_call
 from utils import extract_answer, initialize_clients
 
 from . import arm_protocol as ap
@@ -61,7 +64,7 @@ from . import feedback as fb
 from . import records
 from .decision_input import build_decision_input
 from .format_trial import QUESTION, render_context
-from .replay import DELAY, PlaybookEntry
+from .replay import DELAY, A1Input, PlaybookEntry
 
 MODEL = "cline-pass/deepseek-v4-flash"
 API_PROVIDER = "clinepass"
@@ -181,6 +184,30 @@ def a1_window_block(slots, names, fmt):
     if not slots:
         return ""
     return A1_WINDOW_HEADER + "\n\n".join(a1_decision_block(s, names, fmt) for s in slots)
+
+
+# A1 step 1 (arm_protocol docstring). Written 2026-09-15 before any A1 call. It carries the task text so
+# the decisions can be read, and no instruction the Generator does not also get: no verdict words, no
+# hint about what to conclude. The length is an instruction (A1_REFLECTION_CAP_BASIS), not max_tokens.
+A1_REFLECTION_PROMPT = """你要為下一個決策日的評分寫一段反思。以下是同一任務最近已經到期的 {n} 個決策（最多 5 個；作廢的決策不列出），依決策日由舊到新排列。每個決策列出當時股票池每檔股票的評分、到期後實現的 10 日市場調整報酬（實際α，相對股票池 50 檔等權平均），以及當時寫下的推理。
+
+當時的任務說明：
+{question}
+
+已到期的決策：
+{window}
+
+請檢視這些決策：評分與實現的 α 在哪些地方相符、哪些地方不相符，當時推理中的哪些判斷可能是原因，以及哪些觀察值得帶到下一個決策日。
+
+輸出規定：
+- 回傳一個 JSON 物件，只含一個鍵 "reflection"，值是反思文字（字串）
+- 反思文字不超過約 {words} 個英文單字；若以中文撰寫，不超過約 {zh_chars} 字"""
+
+
+def a1_reflection_prompt(slots, names, fmt):
+    window = "\n\n".join(a1_decision_block(s, names, fmt) for s in slots)
+    return A1_REFLECTION_PROMPT.format(n=len(slots), question=QUESTION, window=window,
+                                       words=ap.A1_REFLECTION_CAP_WORDS, zh_chars=ap.A1_REFLECTION_CAP_ZH_CHARS)
 
 
 # ---------------------------------------------------------------- A2 playbook
@@ -317,6 +344,7 @@ class LiveRoles:
         self.decision_dates = pd.DatetimeIndex(decision_dates)
         self.n_learning = len(self.decision_dates) - DELAY
         self.a1_format, self.log_dir, self.memory_a2, self.label = a1_format, str(log_dir), memory_a2, label
+        self.client = client
         self.generator = Generator(client, API_PROVIDER, MODEL, MAX_TOKENS)
         self.reflector = Reflector(client, API_PROVIDER, MODEL, MAX_TOKENS)
         self.curator = Curator(client, API_PROVIDER, MODEL, MAX_TOKENS)
@@ -325,25 +353,37 @@ class LiveRoles:
         return f"{self.label}-{arm}-{pd.Timestamp(day):%Y%m%d}-{role}-a{attempt_no}"
 
     def generation_inputs(self, arm, day, snapshot):
-        """(playbook, context) for one arm on one date; the question and reflection never vary."""
+        """(playbook, reflection, context) for one arm on one date; the question never varies."""
         d = self.contexts.get(day)
         if arm == "A0":
-            return EMPTY_PLAYBOOK, d.context
+            return EMPTY_PLAYBOOK, "(empty)", d.context
         if arm == "A1":
-            block = a1_window_block(tuple(snapshot), self.names, self.a1_format)
-            return EMPTY_PLAYBOOK, d.context + ("\n\n" + block if block else "")
+            if not isinstance(snapshot, A1Input):
+                raise TypeError("A1 is two calls: run_replay needs reflect_a1 (arm_protocol.A1_CALLS_PER_DECISION)")
+            return EMPTY_PLAYBOOK, snapshot.reflection or "(empty)", d.context
         if arm == "A2":
-            return snapshot.text, d.context
+            return snapshot.text, "(empty)", d.context
         raise ValueError(arm)
 
     def generate(self, arm, day, snapshot, attempt_no):
-        playbook, context = self.generation_inputs(arm, day, snapshot)
+        playbook, reflection, context = self.generation_inputs(arm, day, snapshot)
         call_id = self.call_id(arm, day, "gen", attempt_no)
         response, bullet_ids, info = self.generator.generate(
-            question=QUESTION, playbook=playbook, context=context, reflection="(empty)",
+            question=QUESTION, playbook=playbook, context=context, reflection=reflection,
             use_json_mode=USE_JSON_MODE, call_id=call_id, log_dir=self.log_dir)
         return {"response": response, "bullet_ids": list(bullet_ids), "call_id": call_id,
-                "playbook_sha256": sha256(playbook), **call_facts(info)}
+                "playbook_sha256": sha256(playbook), "reflection_sha256": sha256(reflection), **call_facts(info)}
+
+    def a1_reflect(self, day, slots, attempt_no):
+        """A1 step 1: one reflection over the window, JSON {"reflection": text}."""
+        prompt = a1_reflection_prompt(tuple(slots), self.names, self.a1_format)
+        call_id = self.call_id("A1", day, "a1reflect", attempt_no)
+        response, info = timed_llm_call(self.client, API_PROVIDER, MODEL, prompt, role=ap.A1_REFLECTION_ROLE,
+                                        call_id=call_id, max_tokens=MAX_TOKENS, log_dir=self.log_dir,
+                                        use_json_mode=USE_JSON_MODE)
+        return {"response": response, "call_id": call_id, "prompt_sha256": sha256(prompt), **call_facts(info)}
+
+    a1_reflection_check = staticmethod(ap.a1_reflection_check)
 
     def feedback(self, decision, realized):
         d = self.contexts.get(decision.decision_date)
